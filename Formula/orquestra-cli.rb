@@ -7,10 +7,10 @@ class OrquestraCli < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/berkayoztunc/orquestra-cli/releases/download/v#{version}/orquestra-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "0ff6482e4a015ee17f5e122d1fc6a93ded518042c2646497ba9db15e6f870fed"
+      sha256 "b7b810972925435607a778a9b8db66685ea5e5713214ed97292fd64c1a82768f"
     else
       url "https://github.com/berkayoztunc/orquestra-cli/releases/download/v#{version}/orquestra-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "1f7559467f11589b4a7b5b253b28a0ab942de750d23a106706ff83f0db8ef617"
+      sha256 "2231d9fc7c4d12ef03a633978c52bdd71aa8f059e0d9e4bae66400770ad1be3d"
     end
   end
 
