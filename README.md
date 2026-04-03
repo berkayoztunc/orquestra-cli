@@ -270,4 +270,15 @@ brew upgrade orquestra-cli
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
+
+<div align="center">
+
+**[Website](https://orquestra.dev)** • **[Twitter](https://twitter.com/whitemoondev)**
+
+Made with ❤️ for the Solana ecosystem
+
+⭐ **Star us on GitHub** — it motivates us to build better tools!
+
+</div>
