@@ -1,7 +1,7 @@
 class OrquestraCli < Formula
   desc "CLI for interacting with Solana programs via orquestra.dev"
   homepage "https://github.com/berkayoztunc/orquestra-cli"
-  version "0.1.0"
+  version "0.0.1"
   license "MIT"
 
   on_macos do
