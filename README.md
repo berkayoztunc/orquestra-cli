@@ -10,9 +10,11 @@ Upload your Anchor IDL to orquestra once — this tool turns every instruction i
 
 - **List instructions** — fetch and display all instructions for your program
 - **Interactive run** — fuzzy-select an instruction, answer prompted questions for each arg and account
+- **Find PDA** — derive program-derived addresses by fuzzy-selecting a PDA account and supplying seed values
 - **Auto-fill signers** — if a keypair is configured, signer accounts are pre-filled with your public key
 - **Sign & send** — signs the built transaction with your local keypair and broadcasts to Solana via JSON-RPC
 - **Keypair-free mode** — prints the base58-encoded unsigned transaction for manual wallet signing
+- **Interactive menu** — run `orquestra` with no arguments to get a top-level action picker
 - **Persistent config** — stores settings in `~/.config/orquestra/config.toml`
 
 ---
@@ -179,15 +181,53 @@ Base58 encoded transaction (unsigned):
   https://orquestra.dev/docs/sign-and-send
 ```
 
+### Find PDA (interactive)
+
+```bash
+orquestra pda
+```
+
+Fuzzy-select from the list of PDA accounts defined in your program's IDL, enter seed values, and the CLI derives the address:
+
+```
+▸ 2 PDA accounts in my-program (BUYu...)
+
+? Select PDA account  › vault (owner)
+
+Seed values
+  owner (publicKey): Gk3...abc
+
+✓ PDA derived!
+
+  Address:   Fv9...xyz
+  Bump:      254
+  Program:   BUYu...
+
+Seeds:
+  const  vault_seed        [76617...]
+  arg    owner             = Gk3...abc [0a1b...]
+```
+
+### Derive a specific PDA directly
+
+```bash
+orquestra pda vault
+```
+
+Skips the selection menu and goes straight to seed prompts.
+
 ---
 
 ## Command reference
 
 ```
+orquestra                              # interactive top-level menu
 orquestra list
 orquestra run [INSTRUCTION]
+orquestra pda [ACCOUNT]
 orquestra config set [--project-id] [--api-key] [--rpc] [--keypair] [--api-base]
 orquestra config show
+orquestra config reset                  # interactively update config values
 orquestra --version
 orquestra --help
 ```
