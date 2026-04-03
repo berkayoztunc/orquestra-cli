@@ -4,10 +4,11 @@ use serde_json::{json, Value};
 
 /// Load keypair from a standard Solana CLI JSON file ([u8; 64] byte array)
 pub fn load_keypair(path: &str) -> Result<[u8; 64]> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Cannot read keypair file: {path}"))?;
+    let normalized_path = path.trim();
+    let content = std::fs::read_to_string(normalized_path)
+        .with_context(|| format!("Cannot read keypair file: {normalized_path}"))?;
     let bytes: Vec<u8> = serde_json::from_str(&content)
-        .with_context(|| format!("Keypair file is not a valid JSON byte array: {path}"))?;
+        .with_context(|| format!("Keypair file is not a valid JSON byte array: {normalized_path}"))?;
     if bytes.len() != 64 {
         bail!("Keypair file must contain exactly 64 bytes, got {}", bytes.len());
     }
@@ -22,6 +23,37 @@ pub fn pubkey_from_keypair_file(path: &str) -> Result<String> {
     Ok(bs58::encode(&bytes[32..]).into_string())
 }
 
+// ── Transaction JSON types (Orquestra build API format) ─────────────────────
+
+#[derive(Deserialize)]
+struct TxJson {
+    #[serde(rename = "feePayer")]
+    fee_payer: String,
+    #[allow(dead_code)]
+    #[serde(rename = "recentBlockhash")]
+    recent_blockhash: String,
+    instructions: Vec<IxJson>,
+}
+
+#[derive(Deserialize)]
+struct IxJson {
+    #[serde(rename = "programId")]
+    program_id: String,
+    #[serde(default)]
+    keys: Vec<KeyJson>,
+    #[serde(default)]
+    data: String,
+}
+
+#[derive(Deserialize)]
+struct KeyJson {
+    pubkey: String,
+    #[serde(rename = "isSigner", default)]
+    is_signer: bool,
+    #[serde(rename = "isWritable", default)]
+    is_writable: bool,
+}
+
 /// Sign a base58-encoded unsigned transaction and send it to the Solana RPC.
 /// Returns the transaction signature.
 pub async fn sign_and_send(
@@ -32,44 +64,248 @@ pub async fn sign_and_send(
 ) -> Result<String> {
     let keypair_bytes = load_keypair(keypair_path)?;
 
-    // 1. Decode base58 transaction
-    let tx_bytes = bs58::decode(base58_tx)
-        .into_vec()
-        .context("Invalid base58 transaction")?;
+    // 1. Decode the encoded string (base58 or base64) into raw bytes.
+    let tx_bytes = decode_transaction_bytes(base58_tx)?;
 
-    // 2. Get latest blockhash from RPC
+    // 2. Get a fresh blockhash from the RPC.
     let (blockhash_bytes, _) = get_latest_blockhash(rpc_url).await?;
 
-    // 3. Parse wire format: [sig_count compact-u16] [sigs...] [message...]
-    let (sig_count, sig_count_len) = read_compact_u16(&tx_bytes, 0)?;
-    let sigs_end = sig_count_len + (sig_count as usize) * 64;
-    let mut message = tx_bytes[sigs_end..].to_vec();
+    // 3. Build the binary Solana message.
+    //    Orquestra's build API returns a JSON object encoded as base58.
+    //    If the decoded bytes are valid JSON we reconstruct the canonical
+    //    binary message from scratch and inject the fresh blockhash directly.
+    //    Otherwise fall back to treating the bytes as a binary wire transaction.
+    let message: Vec<u8> = if let Ok(tx_json) = serde_json::from_slice::<TxJson>(&tx_bytes) {
+        build_message_from_json(&tx_json, &blockhash_bytes)?
+    } else {
+        let mut msg = extract_message_bytes(&tx_bytes)?;
+        let accounts_end = blockhash_offset(&msg)?;
+        msg[accounts_end..accounts_end + 32].copy_from_slice(&blockhash_bytes);
+        msg
+    };
 
-    // 4. Find blockhash offset in message header:
-    //    header: 3 bytes, compact-u16 account_count, account_count*32 bytes, then 32-byte blockhash
-    let header_len = 3usize;
-    let (account_count, ac_len) = read_compact_u16(&message, header_len)?;
-    let accounts_end = header_len + ac_len + (account_count as usize) * 32;
-
-    if accounts_end + 32 > message.len() {
-        bail!("Transaction message too short to contain blockhash");
-    }
-
-    // 5. Replace blockhash with fresh one
-    message[accounts_end..accounts_end + 32].copy_from_slice(&blockhash_bytes);
-
-    // 6. Sign message with ed25519
+    // 4. Sign with ed25519.
     let sig = sign_message(&keypair_bytes, &message)?;
 
-    // 7. Reassemble: [compact-u16 = 1] [sig 64 bytes] [message]
+    // 5. Reassemble wire transaction: [compact-u16 = 1] [sig 64 bytes] [message]
     let mut signed: Vec<u8> = Vec::with_capacity(1 + 64 + message.len());
-    signed.push(1u8); // compact-u16 for value 1
+    signed.push(1u8); // compact-u16 encoding of 1
     signed.extend_from_slice(&sig);
     signed.extend_from_slice(&message);
 
-    // 8. Send via JSON-RPC
+    // 6. Base58-encode and send.
     let encoded = bs58::encode(&signed).into_string();
     send_raw_transaction(rpc_url, &encoded).await
+}
+
+/// Build a canonical Solana legacy message binary from the Orquestra JSON format.
+/// Accounts are sorted per Solana spec:
+///   1. writable signers (fee payer always first)
+///   2. read-only signers
+///   3. writable non-signers
+///   4. read-only non-signers (program IDs land here)
+fn build_message_from_json(tx: &TxJson, fresh_blockhash: &[u8; 32]) -> Result<Vec<u8>> {
+    use std::collections::HashMap;
+
+    // Ordered list: (pubkey, is_signer, is_writable)
+    let mut accounts: Vec<(String, bool, bool)> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+
+    macro_rules! add_account {
+        ($pubkey:expr, $signer:expr, $writable:expr) => {{
+            let key = $pubkey.to_string();
+            if let Some(&idx) = seen.get(&key) {
+                accounts[idx].1 |= $signer;
+                accounts[idx].2 |= $writable;
+            } else {
+                let idx = accounts.len();
+                accounts.push((key.clone(), $signer, $writable));
+                seen.insert(key, idx);
+            }
+        }};
+    }
+
+    // Fee payer must always be first and is a writable signer.
+    add_account!(&tx.fee_payer, true, true);
+
+    for ix in &tx.instructions {
+        for key in &ix.keys {
+            add_account!(&key.pubkey, key.is_signer, key.is_writable);
+        }
+        // Program IDs are read-only non-signers.
+        add_account!(&ix.program_id, false, false);
+    }
+
+    // Sort into canonical order, keeping fee payer at index 0.
+    let fee_payer_entry = accounts.remove(0);
+    accounts.sort_by_key(|(_, is_signer, is_writable)| match (*is_signer, *is_writable) {
+        (true, true)   => 0u8,
+        (true, false)  => 1,
+        (false, true)  => 2,
+        (false, false) => 3,
+    });
+    accounts.insert(0, fee_payer_entry);
+
+    // Build an index map for fast O(1) lookup.
+    let index_map: HashMap<&str, u8> = accounts
+        .iter()
+        .enumerate()
+        .map(|(i, (k, _, _))| (k.as_str(), i as u8))
+        .collect();
+
+    let num_signers       = accounts.iter().filter(|(_, s, _)| *s).count();
+    let num_ro_signed     = accounts.iter().filter(|(_, s, w)| *s && !*w).count();
+    let num_ro_unsigned   = accounts.iter().filter(|(_, s, w)| !*s && !*w).count();
+
+    let mut msg: Vec<u8> = Vec::new();
+
+    // Header (3 bytes)
+    msg.push(num_signers     as u8);
+    msg.push(num_ro_signed   as u8);
+    msg.push(num_ro_unsigned as u8);
+
+    // Account keys
+    write_compact_u16(&mut msg, accounts.len() as u16);
+    for (pubkey_str, _, _) in &accounts {
+        let bytes = bs58::decode(pubkey_str)
+            .into_vec()
+            .with_context(|| format!("Invalid pubkey: {pubkey_str}"))?;
+        if bytes.len() != 32 {
+            bail!("Pubkey {pubkey_str} decoded to {} bytes, expected 32", bytes.len());
+        }
+        msg.extend_from_slice(&bytes);
+    }
+
+    // Blockhash (fresh, 32 bytes)
+    msg.extend_from_slice(fresh_blockhash);
+
+    // Instructions
+    write_compact_u16(&mut msg, tx.instructions.len() as u16);
+    for ix in &tx.instructions {
+        let prog_idx = *index_map
+            .get(ix.program_id.as_str())
+            .with_context(|| format!("Program ID {} not in account list", ix.program_id))?;
+        msg.push(prog_idx);
+
+        write_compact_u16(&mut msg, ix.keys.len() as u16);
+        for key in &ix.keys {
+            let idx = *index_map
+                .get(key.pubkey.as_str())
+                .with_context(|| format!("Account {} not in account list", key.pubkey))?;
+            msg.push(idx);
+        }
+
+        let data = decode_instruction_data(&ix.data)?;
+        write_compact_u16(&mut msg, data.len() as u16);
+        msg.extend_from_slice(&data);
+    }
+
+    Ok(msg)
+}
+
+/// Decode instruction data that may be base58 or base64 encoded.
+fn decode_instruction_data(encoded: &str) -> Result<Vec<u8>> {
+    use base64::Engine;
+    if encoded.is_empty() {
+        return Ok(vec![]);
+    }
+    if let Ok(b) = bs58::decode(encoded).into_vec() {
+        return Ok(b);
+    }
+    if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(encoded) {
+        return Ok(b);
+    }
+    bail!("Cannot decode instruction data (not base58 or base64): {encoded}")
+}
+
+/// Write a Solana compact-u16 into a byte buffer.
+fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
+    let mut v = val;
+    loop {
+        let mut byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v > 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if v == 0 {
+            break;
+        }
+    }
+}
+
+/// Decode an encoded transaction string.
+/// Tries base58 first (legacy Solana), then base64 standard, then base64 URL-safe.
+/// Returns the raw bytes and the encoding name used (for diagnostics).
+fn decode_transaction_bytes(encoded: &str) -> Result<Vec<u8>> {
+    use base64::Engine;
+
+    // Attempt 1: base58
+    if let Ok(bytes) = bs58::decode(encoded).into_vec() {
+        if !bytes.is_empty() {
+            return Ok(bytes);
+        }
+    }
+
+    // Attempt 2: base64 standard
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) {
+        if !bytes.is_empty() {
+            return Ok(bytes);
+        }
+    }
+
+    // Attempt 3: base64 URL-safe (no padding)
+    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) {
+        if !bytes.is_empty() {
+            return Ok(bytes);
+        }
+    }
+
+    bail!(
+        "Transaction string is not valid base58 or base64 (len={})",
+        encoded.len()
+    );
+}
+
+fn extract_message_bytes(tx_bytes: &[u8]) -> Result<Vec<u8>> {
+    if tx_bytes.is_empty() {
+        bail!("Transaction payload is empty");
+    }
+
+    // Attempt 1: treat whole payload as a raw unsigned message (most common from
+    // transaction-builder APIs that return a message without a prepended signature
+    // section).  Validate by computing the blockhash offset — if it lands inside
+    // the buffer this interpretation is correct.
+    if blockhash_offset(tx_bytes).is_ok() {
+        return Ok(tx_bytes.to_vec());
+    }
+
+    // Attempt 2: treat as a full wire transaction whose first compact-u16 encodes
+    // the number of existing signatures.  Strip that section and validate again.
+    if let Ok((sig_count, sig_count_len)) = read_compact_u16(tx_bytes, 0) {
+        if let Some(sigs_end) = sig_count_len.checked_add((sig_count as usize).saturating_mul(64)) {
+            if sigs_end < tx_bytes.len() {
+                let candidate = &tx_bytes[sigs_end..];
+                if blockhash_offset(candidate).is_ok() {
+                    return Ok(candidate.to_vec());
+                }
+            }
+        }
+    }
+
+    let hex_preview: String = tx_bytes
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    bail!(
+        "Cannot determine transaction message format (payload_len={}, first_bytes=[{}]). \
+         Payload does not parse as either a raw Solana message or a signed wire transaction.",
+        tx_bytes.len(),
+        hex_preview
+    );
 }
 
 /// Ed25519 signing using ed25519-dalek (SigningKey takes the 32-byte seed)
@@ -189,4 +425,52 @@ fn read_compact_u16(bytes: &[u8], offset: usize) -> Result<(u16, usize)> {
         }
     }
     Ok((val, consumed))
+}
+
+/// Returns the byte offset where account keys end and blockhash starts.
+/// Supports both legacy and versioned message formats.
+fn blockhash_offset(message: &[u8]) -> Result<usize> {
+    if message.is_empty() {
+        bail!("Transaction message is empty");
+    }
+
+    // Legacy message starts directly with 3-byte header.
+    // Versioned message starts with 1-byte prefix (MSB set), then 3-byte header.
+    let header_start = if message[0] & 0x80 != 0 {
+        if message.len() < 4 {
+            bail!("Versioned transaction message too short for header");
+        }
+        1usize
+    } else {
+        0usize
+    };
+
+    let account_count_offset = header_start + 3;
+    if account_count_offset >= message.len() {
+        bail!("Transaction message too short to contain account key count");
+    }
+
+    let (account_count, ac_len) = read_compact_u16(message, account_count_offset)?;
+    let accounts_start = account_count_offset
+        .checked_add(ac_len)
+        .context("Transaction message account key section overflow")?;
+    let key_bytes = (account_count as usize)
+        .checked_mul(32)
+        .context("Transaction account key bytes overflow")?;
+
+    let accounts_end = accounts_start
+        .checked_add(key_bytes)
+        .context("Transaction message account key end overflow")?;
+
+    // At minimum, blockhash (32 bytes) must follow account keys.
+    if accounts_end + 32 > message.len() {
+        bail!(
+            "Invalid transaction payload: parsed account_count={} requires >= {} bytes before/including blockhash, but message_len={}",
+            account_count,
+            accounts_end + 32,
+            message.len()
+        );
+    }
+
+    Ok(accounts_end)
 }

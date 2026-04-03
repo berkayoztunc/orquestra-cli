@@ -45,19 +45,19 @@ impl Config {
     /// Merge non-None fields from another Config into self
     pub fn merge(&mut self, other: Config) {
         if other.project_id.is_some() {
-            self.project_id = other.project_id;
+            self.project_id = normalize_optional(other.project_id);
         }
         if other.api_key.is_some() {
-            self.api_key = other.api_key;
+            self.api_key = normalize_optional(other.api_key);
         }
         if other.rpc_url.is_some() {
-            self.rpc_url = other.rpc_url;
+            self.rpc_url = normalize_optional(other.rpc_url);
         }
         if other.keypair_path.is_some() {
-            self.keypair_path = other.keypair_path;
+            self.keypair_path = normalize_optional(other.keypair_path);
         }
         if other.api_base_url.is_some() {
-            self.api_base_url = other.api_base_url;
+            self.api_base_url = normalize_optional(other.api_base_url);
         }
     }
 
@@ -106,4 +106,15 @@ fn mask_secret(s: &str) -> String {
         return "*".repeat(len);
     }
     format!("{}***{}", &s[..4], &s[len - 4..])
+}
+
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }

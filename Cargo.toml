@@ -24,6 +24,7 @@ anyhow = "1"
 colored = "2"
 indicatif = "0.17"
 ed25519-dalek = "2"
+base64 = "0.22"
 
 [profile.release]
 opt-level = 3

@@ -502,7 +502,12 @@ pub async fn cmd_config_reset() -> Result<()> {
 }
 
 fn non_empty(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 // ── PDA finder ────────────────────────────────────────────────────────────────
@@ -587,7 +592,7 @@ pub async fn cmd_pda(config: &Config, account_name: Option<&str>) -> Result<()> 
     let arg_seeds: Vec<&PdaSeed> = selected
         .seeds
         .iter()
-        .filter(|s| s.kind == "arg")
+        .filter(|s| s.kind == "arg" || s.kind == "account")
         .collect();
 
     let mut args: HashMap<String, String> = HashMap::new();
@@ -595,7 +600,7 @@ pub async fn cmd_pda(config: &Config, account_name: Option<&str>) -> Result<()> 
         println!("\n{}", "Seed values".bold());
         for seed in &arg_seeds {
             let name = seed.name.as_deref().unwrap_or("value");
-            let ty = seed.ty.as_deref().unwrap_or("string");
+            let ty = if seed.kind == "account" { "publicKey" } else { seed.ty.as_deref().unwrap_or("string") };
             let theme = ColorfulTheme::default();
             let value: String = Input::with_theme(&theme)
                 .with_prompt(format!("{name} ({ty})"))
