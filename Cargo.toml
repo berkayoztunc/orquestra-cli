@@ -1,0 +1,32 @@
+[package]
+name = "orquestra"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool for interacting with Solana programs via orquestra.dev"
+license = "MIT"
+repository = "https://github.com/berkayoztunc/orquestra-cli"
+
+[[bin]]
+name = "orquestra"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+bs58 = "0.5"
+dirs = "5"
+toml = "0.8"
+anyhow = "1"
+colored = "2"
+indicatif = "0.17"
+ed25519-dalek = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

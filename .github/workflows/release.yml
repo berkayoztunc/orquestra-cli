@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: orquestra
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (for cross-compilation)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build release binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package binary
+        id: package
+        run: |
+          TAG=${GITHUB_REF_NAME}
+          ASSET_NAME="${{ env.BIN_NAME }}-${TAG}-${{ matrix.target }}.${{ matrix.archive }}"
+          BINARY="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}"
+
+          mkdir -p dist
+          cp "$BINARY" dist/
+
+          cd dist
+          tar -czf "../${ASSET_NAME}" "${{ env.BIN_NAME }}"
+          cd ..
+
+          SHA256=$(shasum -a 256 "${ASSET_NAME}" | awk '{print $1}')
+
+          echo "asset_name=${ASSET_NAME}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset_name }}
+          path: ${{ steps.package.outputs.asset_name }}
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.asset_name }}
+          generate_release_notes: true
+
+  update-formula:
+    name: Update Homebrew Formula
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download macOS arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: orquestra-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
+          path: ./artifacts/arm64
+
+      - name: Download macOS x86_64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: orquestra-${{ github.ref_name }}-x86_64-apple-darwin.tar.gz
+          path: ./artifacts/x86_64
+
+      - name: Compute SHA256 and update formula
+        run: |
+          TAG=${GITHUB_REF_NAME}
+          REPO="${{ github.repository }}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          ARM64_FILE="artifacts/arm64/orquestra-${TAG}-aarch64-apple-darwin.tar.gz"
+          X86_FILE="artifacts/x86_64/orquestra-${TAG}-x86_64-apple-darwin.tar.gz"
+
+          SHA_ARM64=$(shasum -a 256 "$ARM64_FILE" | awk '{print $1}')
+          SHA_X86=$(shasum -a 256 "$X86_FILE" | awk '{print $1}')
+
+          # Update formula
+          sed -i "s|version \".*\"|version \"${TAG#v}\"|" Formula/orquestra-cli.rb
+          sed -i "s|ARM64_URL|${BASE_URL}/orquestra-${TAG}-aarch64-apple-darwin.tar.gz|g" Formula/orquestra-cli.rb || true
+          sed -i "s|X86_URL|${BASE_URL}/orquestra-${TAG}-x86_64-apple-darwin.tar.gz|g" Formula/orquestra-cli.rb || true
+          sed -i "s|ARM64_SHA256|${SHA_ARM64}|g" Formula/orquestra-cli.rb || true
+          sed -i "s|X86_SHA256|${SHA_X86}|g" Formula/orquestra-cli.rb || true
+
+          # More robust: use Python to patch the formula
+          python3 scripts/update_formula.py \
+            --formula Formula/orquestra-cli.rb \
+            --tag "${TAG}" \
+            --base-url "${BASE_URL}" \
+            --arm64-sha "${SHA_ARM64}" \
+            --x86-sha "${SHA_X86}"
+
+      - name: Commit updated formula
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/orquestra-cli.rb
+          git commit -m "chore(formula): bump to ${GITHUB_REF_NAME}" || echo "No changes"
+          git push
