@@ -138,7 +138,8 @@ pub struct PdaSeed {
 pub struct DeriveRequest {
     pub instruction: String,
     pub account: String,
-    pub args: HashMap<String, serde_json::Value>,
+    #[serde(rename = "seedValues")]
+    pub seed_values: HashMap<String, String>,
 }
 
 /// POST /api/{id}/pda/derive — response
@@ -348,13 +349,14 @@ impl ApiClient {
         project_id: &str,
         instruction: &str,
         account: &str,
-        args: HashMap<String, serde_json::Value>,
+        _pda_seeds: &[crate::api::PdaSeed],
+        arg_values: HashMap<String, String>,
     ) -> Result<DeriveResponse> {
         let url = self.url(&format!("api/{project_id}/pda/derive"));
         let body = DeriveRequest {
             instruction: instruction.to_string(),
             account: account.to_string(),
-            args,
+            seed_values: arg_values,
         };
         let resp = self
             .apply_api_key(self.client.post(&url))

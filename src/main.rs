@@ -15,22 +15,27 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::List => {
+        None => {
+            let config = Config::load()?;
+            interactive::cmd_menu(&config).await?;
+        }
+
+        Some(Commands::List) => {
             let config = Config::load()?;
             interactive::cmd_list(&config).await?;
         }
 
-        Commands::Run { instruction } => {
+        Some(Commands::Run { instruction }) => {
             let config = Config::load()?;
             interactive::cmd_run(&config, instruction.as_deref()).await?;
         }
 
-        Commands::Pda { account } => {
+        Some(Commands::Pda { account }) => {
             let config = Config::load()?;
             interactive::cmd_pda(&config, account.as_deref()).await?;
         }
 
-        Commands::Config { action } => match action {
+        Some(Commands::Config { action }) => match action {
             ConfigAction::Set(args) => {
                 let mut config = Config::load()?;
                 config.merge(Config {

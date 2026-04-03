@@ -1,11 +1,45 @@
 use anyhow::{bail, Result};
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input};
+use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Select};
 use std::collections::HashMap;
 
 use crate::api::{ApiClient, Instruction, InstructionAccount, InstructionArg, PdaAccount, PdaSeed};
 use crate::config::Config;
 use crate::solana;
+
+// ── Top-level interactive menu ────────────────────────────────────────────────
+
+pub async fn cmd_menu(config: &Config) -> Result<()> {
+    println!(
+        "\n{} {}\n",
+        "orquestra".cyan().bold(),
+        "— what do you want to do?".dimmed()
+    );
+
+    let options = [
+        "List     — show all instructions",
+        "Run      — run an instruction",
+        "Find PDA  — derive a program-derived address",
+        "Config   — view or update configuration",
+        "Quit",
+    ];
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Action")
+        .items(&options)
+        .default(0)
+        .interact()?;
+
+    match selection {
+        0 => cmd_list(config).await?,
+        1 => cmd_run(config, None).await?,
+        2 => cmd_pda(config, None).await?,
+        3 => cmd_config_menu().await?,
+        _ => println!("{}", "Goodbye.".dimmed()),
+    }
+
+    Ok(())
+}
 
 pub async fn cmd_list(config: &Config) -> Result<()> {
     let program_address = config.require_project_id()?;
@@ -376,6 +410,31 @@ fn print_base58_tx(tx: &str) {
     );
 }
 
+pub async fn cmd_config_menu() -> Result<()> {
+    let options = [
+        "show   — display current config",
+        "set    — interactively update config values",
+        "back",
+    ];
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Config")
+        .items(&options)
+        .default(0)
+        .interact()?;
+
+    match selection {
+        0 => {
+            let config = Config::load()?;
+            println!("{}", config.display());
+        }
+        1 => cmd_config_reset().await?,
+        _ => {}
+    }
+
+    Ok(())
+}
+
 pub async fn cmd_config_reset() -> Result<()> {
     let mut config = Config::load()?;
 
@@ -531,7 +590,7 @@ pub async fn cmd_pda(config: &Config, account_name: Option<&str>) -> Result<()> 
         .filter(|s| s.kind == "arg")
         .collect();
 
-    let mut args: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut args: HashMap<String, String> = HashMap::new();
     if !arg_seeds.is_empty() {
         println!("\n{}", "Seed values".bold());
         for seed in &arg_seeds {
@@ -541,7 +600,7 @@ pub async fn cmd_pda(config: &Config, account_name: Option<&str>) -> Result<()> 
             let value: String = Input::with_theme(&theme)
                 .with_prompt(format!("{name} ({ty})"))
                 .interact_text()?;
-            args.insert(name.to_string(), serde_json::Value::String(value));
+            args.insert(name.to_string(), value);
         }
     }
 
@@ -550,7 +609,7 @@ pub async fn cmd_pda(config: &Config, account_name: Option<&str>) -> Result<()> 
     spinner.set_message("Deriving PDA...");
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));
     let result = client
-        .derive_pda(&project.id, &selected.account, args)
+        .derive_pda(&project.id, &selected.instruction, &selected.account, &selected.seeds, args)
         .await;
     spinner.finish_and_clear();
     let result = result?;
