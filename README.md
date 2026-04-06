@@ -4,6 +4,8 @@ A fast Rust CLI for interacting with Solana programs via [orquestra.dev](https:/
 
 Upload your Anchor IDL to orquestra once, **or point the CLI directly at a local IDL JSON file** — this tool turns every instruction into an interactive prompt, builds the transaction, and optionally signs and sends it to Solana using your local keypair.
 
+![ss.png](./ss.png)
+
 ---
 
 ## Features
