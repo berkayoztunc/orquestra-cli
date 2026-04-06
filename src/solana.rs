@@ -2,7 +2,160 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// Load keypair from a standard Solana CLI JSON file ([u8; 64] byte array)
+// ── PDA derivation ────────────────────────────────────────────────────────────
+
+/// Solana `create_program_address` — SHA256(seeds... || program_id || "ProgramDerivedAddress")
+/// and verify the resulting 32 bytes are NOT a valid ed25519 point.
+fn create_program_address(seeds: &[&[u8]], program_id: &[u8; 32]) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for seed in seeds {
+        hasher.update(seed);
+    }
+    hasher.update(program_id);
+    hasher.update(b"ProgramDerivedAddress");
+    let result: [u8; 32] = hasher.finalize().into();
+
+    // Valid PDA must be off the ed25519 curve.
+    let compressed = curve25519_dalek::edwards::CompressedEdwardsY(result);
+    if compressed.decompress().is_some() {
+        return None; // on-curve → invalid PDA
+    }
+    Some(result)
+}
+
+/// Find a valid program-derived address by iterating bump from 255 → 0.
+/// Returns `(base58_address, bump)`.
+pub fn find_program_address(seeds: &[Vec<u8>], program_id_b58: &str) -> Result<(String, u8)> {
+    let prog_bytes = bs58::decode(program_id_b58)
+        .into_vec()
+        .with_context(|| format!("Invalid program ID base58: {program_id_b58}"))?;
+    let prog: [u8; 32] = prog_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Program ID must be 32 bytes"))?;
+
+    for bump in (0..=255u8).rev() {
+        let mut with_bump: Vec<Vec<u8>> = seeds.to_vec();
+        with_bump.push(vec![bump]);
+        let refs: Vec<&[u8]> = with_bump.iter().map(|s| s.as_slice()).collect();
+        if let Some(addr) = create_program_address(&refs, &prog) {
+            return Ok((bs58::encode(addr).into_string(), bump));
+        }
+    }
+    bail!("Could not find a valid program-derived address (all bumps exhausted)")
+}
+
+// ── Unsigned message builder ──────────────────────────────────────────────────
+
+/// Build a signed-transaction-ready binary Solana **legacy message** with a
+/// zeroed recent-blockhash placeholder.  The caller can hand this base58 string
+/// directly to `sign_and_send`, which will:
+///   1. Decode the base58 binary.
+///   2. Skip the JSON-parse path (it's not JSON).
+///   3. Call `extract_message_bytes` + `blockhash_offset` to locate the
+///      placeholder and overwrite it with a fresh blockhash.
+///   4. Sign + broadcast.
+///
+/// `accounts` should be the instruction's account list **in IDL order** as
+/// `(pubkey_base58, is_signer, is_writable)`.  The function deduplicates
+/// internally and sorts into canonical Solana ordering.
+pub fn encode_unsigned_message(
+    fee_payer: &str,
+    program_id: &str,
+    accounts: &[(String, bool, bool)],
+    instruction_data: &[u8],
+) -> Result<String> {
+    // Build the full deduplicated account list.
+    // Order: fee payer, then instruction accounts, then program id.
+    let mut all: Vec<(String, bool, bool)> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    macro_rules! add_acc {
+        ($key:expr, $signer:expr, $writable:expr) => {{
+            let k = $key.to_string();
+            if let Some(&idx) = seen.get(&k) {
+                all[idx].1 |= $signer;
+                all[idx].2 |= $writable;
+            } else {
+                let idx = all.len();
+                all.push((k.clone(), $signer, $writable));
+                seen.insert(k, idx);
+            }
+        }};
+    }
+
+    add_acc!(fee_payer, true, true);
+    for (pk, is_signer, is_writable) in accounts {
+        add_acc!(pk, *is_signer, *is_writable);
+    }
+    add_acc!(program_id, false, false);
+
+    // Sort into canonical Solana order, keeping fee payer first.
+    let fp = all.remove(0);
+    all.sort_by_key(|(_, s, w)| match (*s, *w) {
+        (true, true) => 0u8,
+        (true, false) => 1,
+        (false, true) => 2,
+        (false, false) => 3,
+    });
+    all.insert(0, fp);
+
+    // Build index map.
+    let index_map: std::collections::HashMap<&str, u8> = all
+        .iter()
+        .enumerate()
+        .map(|(i, (k, _, _))| (k.as_str(), i as u8))
+        .collect();
+
+    let num_signers = all.iter().filter(|(_, s, _)| *s).count() as u8;
+    let num_ro_signed = all.iter().filter(|(_, s, w)| *s && !*w).count() as u8;
+    let num_ro_unsigned = all.iter().filter(|(_, s, w)| !*s && !*w).count() as u8;
+
+    let mut msg: Vec<u8> = Vec::new();
+
+    // 3-byte message header.
+    msg.push(num_signers);
+    msg.push(num_ro_signed);
+    msg.push(num_ro_unsigned);
+
+    // Account keys.
+    write_compact_u16(&mut msg, all.len() as u16);
+    for (pk, _, _) in &all {
+        let bytes = bs58::decode(pk)
+            .into_vec()
+            .with_context(|| format!("Invalid pubkey: {pk}"))?;
+        anyhow::ensure!(bytes.len() == 32, "Pubkey {pk} must decode to 32 bytes");
+        msg.extend_from_slice(&bytes);
+    }
+
+    // Recent blockhash placeholder — 32 zero bytes; `sign_and_send` patches this.
+    msg.extend_from_slice(&[0u8; 32]);
+
+    // Single instruction.
+    write_compact_u16(&mut msg, 1u16);
+
+    let prog_idx = *index_map
+        .get(program_id)
+        .with_context(|| format!("Program ID {program_id} not found in account list"))?;
+    msg.push(prog_idx);
+
+    // Account indices (in IDL order, matching `accounts` slice).
+    write_compact_u16(&mut msg, accounts.len() as u16);
+    for (pk, _, _) in accounts {
+        let idx = *index_map
+            .get(pk.as_str())
+            .with_context(|| format!("Account {pk} not found in account list"))?;
+        msg.push(idx);
+    }
+
+    // Instruction data.
+    write_compact_u16(&mut msg, instruction_data.len() as u16);
+    msg.extend_from_slice(instruction_data);
+
+    Ok(bs58::encode(&msg).into_string())
+}
+
+
 pub fn load_keypair(path: &str) -> Result<[u8; 64]> {
     let normalized_path = path.trim();
     let content = std::fs::read_to_string(normalized_path)

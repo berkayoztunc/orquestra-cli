@@ -2,7 +2,7 @@
 
 A fast Rust CLI for interacting with Solana programs via [orquestra.dev](https://orquestra.dev).
 
-Upload your Anchor IDL to orquestra once — this tool turns every instruction into an interactive prompt, builds the transaction, and optionally signs and sends it to Solana using your local keypair.
+Upload your Anchor IDL to orquestra once, **or point the CLI directly at a local IDL JSON file** — this tool turns every instruction into an interactive prompt, builds the transaction, and optionally signs and sends it to Solana using your local keypair.
 
 ---
 
@@ -11,7 +11,9 @@ Upload your Anchor IDL to orquestra once — this tool turns every instruction i
 - **List instructions** — fetch and display all instructions for your program
 - **Interactive run** — fuzzy-select an instruction, answer prompted questions for each arg and account
 - **Find PDA** — derive program-derived addresses by fuzzy-selecting a PDA account and supplying seed values
+- **Local IDL file mode** — point the CLI at a Solana/Anchor IDL JSON file and operate fully offline without an Orquestra account
 - **Auto-fill signers** — if a keypair is configured, signer accounts are pre-filled with your public key
+- **Auto-derive PDAs** — PDA accounts whose seeds are fully resolvable from your inputs are derived silently; fixed-address accounts (system_program, token_program, etc.) are filled automatically
 - **Sign & send** — signs the built transaction with your local keypair and broadcasts to Solana via JSON-RPC
 - **Keypair-free mode** — prints the base58-encoded unsigned transaction for manual wallet signing
 - **Interactive menu** — run `orquestra` with no arguments to get a top-level action picker
@@ -61,11 +63,22 @@ cargo build --release
 
 ## Setup
 
-### 1. Get your project ID and API key
+The CLI has two operating modes. Choose the one that fits your workflow:
+
+| Mode | When to use |
+|------|-------------|
+| **API mode** (default) | You have an Orquestra account and API key. All instruction metadata is fetched from the cloud. |
+| **Local IDL file mode** | You have a Solana/Anchor IDL JSON file locally and prefer not to use the Orquestra API. Works fully offline. |
+
+---
+
+### API mode setup
+
+#### 1. Get your project ID and API key
 
 Sign in at [orquestra.dev](https://orquestra.dev), upload your Anchor IDL, and generate an API key from the dashboard.
 
-### 2. Configure the CLI
+#### 2. Configure the CLI
 
 ```bash
 orquestra config set \
@@ -85,7 +98,7 @@ orquestra config set \
 
 > The keypair is optional. Without it the CLI prints the unsigned base58 transaction for you to sign with any wallet.
 
-### 3. Verify config
+#### 3. Verify config
 
 ```bash
 orquestra config show
@@ -97,13 +110,59 @@ api_key     : sk_t***y123
 rpc_url     : https://api.mainnet-beta.solana.com
 keypair_path: /Users/alice/.config/solana/id.json
 api_base_url: https://api.orquestra.build
+idl_path    : (not set)
 ```
 
 ---
 
-## Usage
+### Local IDL file mode setup
 
-### List instructions
+If you have a Solana/Anchor IDL JSON file (e.g. exported from `anchor build` or downloaded from the chain), you can skip the Orquestra API entirely.
+
+#### 1. Point the CLI at your IDL file
+
+```bash
+orquestra config set \
+  --idl     /path/to/program.json \
+  --rpc     https://api.mainnet-beta.solana.com \
+  --keypair ~/.config/solana/id.json
+```
+
+| Flag       | Description                                       |
+|------------|---------------------------------------------------|
+| `--idl`    | Absolute or relative path to the IDL JSON file    |
+| `--rpc`    | Solana RPC endpoint used for sign & send          |
+| `--keypair`| Path to Solana keypair JSON (optional)            |
+
+> When `idl_path` is set the CLI operates in **file mode** — no Orquestra account or API key required.  
+> To switch back to API mode, clear the field: `orquestra config set --idl ""`
+
+#### 2. Verify config
+
+```bash
+orquestra config show
+```
+
+```
+program_id  : (not set)
+api_key     : (not set)
+rpc_url     : https://api.mainnet-beta.solana.com
+keypair_path: /Users/alice/.config/solana/id.json
+api_base_url: https://api.orquestra.dev
+idl_path    : /path/to/program.json
+```
+
+#### Supported IDL format
+
+The CLI parses the **native Solana/Anchor IDL JSON format** — the same file produced by `anchor build` (found at `target/idl/<program>.json`) or fetchable via `anchor idl fetch <program-id>`.
+
+Supported Borsh argument types: `string`, `u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, `i64`, `i128`, `bool`, `pubkey`.
+
+Complex/nested struct types require API mode.
+
+---
+
+## Usage
 
 ```bash
 orquestra list
@@ -225,7 +284,7 @@ orquestra                              # interactive top-level menu
 orquestra list
 orquestra run [INSTRUCTION]
 orquestra pda [ACCOUNT]
-orquestra config set [--project-id] [--api-key] [--rpc] [--keypair] [--api-base]
+orquestra config set [--project-id] [--api-key] [--rpc] [--keypair] [--api-base] [--idl]
 orquestra config show
 orquestra config reset                  # interactively update config values
 orquestra --version

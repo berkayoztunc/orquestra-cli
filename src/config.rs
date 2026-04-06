@@ -14,8 +14,8 @@ pub struct Config {
     pub api_key: Option<String>,
     pub rpc_url: Option<String>,
     pub keypair_path: Option<String>,
-    pub api_base_url: Option<String>,
-}
+    pub api_base_url: Option<String>,    /// Path to a local Solana IDL JSON file (enables offline/file mode)
+    pub idl_path:     Option<String>,}
 
 impl Config {
     pub fn load() -> Result<Self> {
@@ -59,6 +59,9 @@ impl Config {
         if other.api_base_url.is_some() {
             self.api_base_url = normalize_optional(other.api_base_url);
         }
+        if other.idl_path.is_some() {
+            self.idl_path = normalize_optional(other.idl_path);
+        }
     }
 
     pub fn api_base(&self) -> &str {
@@ -75,12 +78,13 @@ impl Config {
     pub fn display(&self) -> String {
         let masked_key = self.api_key.as_deref().map(mask_secret).unwrap_or_else(|| "(not set)".to_string());
         format!(
-            "program_id  : {}\napi_key     : {}\nrpc_url     : {}\nkeypair_path: {}\napi_base_url: {}",
+            "program_id  : {}\napi_key     : {}\nrpc_url     : {}\nkeypair_path: {}\napi_base_url: {}\nidl_path    : {}",
             self.project_id.as_deref().unwrap_or("(not set)"),
             masked_key,
             self.rpc_url.as_deref().unwrap_or(DEFAULT_RPC),
             self.keypair_path.as_deref().unwrap_or("(not set)"),
             self.api_base_url.as_deref().unwrap_or(DEFAULT_API_BASE),
+            self.idl_path.as_deref().unwrap_or("(not set)"),
         )
     }
 

@@ -1,6 +1,7 @@
 mod api;
 mod cli;
 mod config;
+mod idl;
 mod interactive;
 mod solana;
 
@@ -44,6 +45,7 @@ async fn main() -> Result<()> {
                     rpc_url: args.rpc,
                     keypair_path: args.keypair,
                     api_base_url: args.api_base,
+                    idl_path: args.idl,
                 });
                 config.save()?;
                 println!("{} Config saved.", "✓".green().bold());

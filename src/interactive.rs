@@ -1,10 +1,11 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Select};
 use std::collections::HashMap;
 
 use crate::api::{ApiClient, Instruction, InstructionAccount, InstructionArg, PdaAccount, PdaSeed};
 use crate::config::Config;
+use crate::idl;
 use crate::solana;
 
 // ── Top-level interactive menu ────────────────────────────────────────────────
@@ -42,6 +43,11 @@ pub async fn cmd_menu(config: &Config) -> Result<()> {
 }
 
 pub async fn cmd_list(config: &Config) -> Result<()> {
+    // File mode: parse IDL directly, no API call.
+    if let Some(idl_path) = &config.idl_path {
+        return cmd_list_file(idl_path).await;
+    }
+
     let program_address = config.require_project_id()?;
     let client = ApiClient::new(config.api_base(), config.optional_api_key());
 
@@ -88,6 +94,11 @@ pub async fn cmd_list(config: &Config) -> Result<()> {
 }
 
 pub async fn cmd_run(config: &Config, instruction_name: Option<&str>) -> Result<()> {
+    // File mode: build transaction locally from IDL, no API call.
+    if let Some(idl_path) = &config.idl_path {
+        return cmd_run_file(idl_path, instruction_name, config).await;
+    }
+
     let program_address = config.require_project_id()?;
     let client = ApiClient::new(config.api_base(), config.optional_api_key());
 
@@ -484,6 +495,13 @@ pub async fn cmd_config_reset() -> Result<()> {
         .allow_empty(true)
         .interact_text()?;
 
+    // idl_path
+    let idl_path_input: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("{}", "IDL file path (leave empty to use API mode)".cyan()))
+        .default(config.idl_path.clone().unwrap_or_default())
+        .allow_empty(true)
+        .interact_text()?;
+
     // Apply — empty string means "clear the field"
     config.project_id   = non_empty(project_id);
     // For api_key: if user typed nothing, keep existing value
@@ -493,6 +511,7 @@ pub async fn cmd_config_reset() -> Result<()> {
     config.rpc_url      = non_empty(rpc_url);
     config.keypair_path = non_empty(keypair_path);
     config.api_base_url = non_empty(api_base);
+    config.idl_path     = non_empty(idl_path_input);
 
     config.save()?;
 
@@ -513,6 +532,11 @@ fn non_empty(s: String) -> Option<String> {
 // ── PDA finder ────────────────────────────────────────────────────────────────
 
 pub async fn cmd_pda(config: &Config, account_name: Option<&str>) -> Result<()> {
+    // File mode: derive PDA locally, no API call.
+    if let Some(idl_path) = &config.idl_path {
+        return cmd_pda_file(idl_path, account_name).await;
+    }
+
     let program_address = config.require_project_id()?;
     let client = ApiClient::new(config.api_base(), config.optional_api_key());
 
@@ -649,4 +673,401 @@ pub async fn cmd_pda(config: &Config, account_name: Option<&str>) -> Result<()> 
     }
     println!();
     Ok(())
+}
+
+// ── File-mode sub-commands ────────────────────────────────────────────────────
+
+async fn cmd_list_file(idl_path: &str) -> Result<()> {
+    let parsed_idl = idl::parse_idl_file(idl_path)?;
+    let instructions = idl::idl_to_instructions(&parsed_idl);
+
+    if instructions.is_empty() {
+        println!("{}", "No instructions found in IDL file.".yellow());
+        return Ok(());
+    }
+
+    println!(
+        "\n{} {} instructions  {}  ({})\n",
+        "\u{25b8}".cyan().bold(),
+        instructions.len().to_string().bold(),
+        "(local IDL)".cyan(),
+        parsed_idl.address.dimmed()
+    );
+
+    let name_width = instructions.iter().map(|i| i.name.len()).max().unwrap_or(10) + 2;
+    for ix in &instructions {
+        let args_desc: String = if ix.args.is_empty() {
+            "(no args)".to_string()
+        } else {
+            ix.args
+                .iter()
+                .map(|a| format!("{}: {}", a.name, a.ty))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!(
+            "  {:<width$} {}",
+            ix.name.green().bold(),
+            args_desc.dimmed(),
+            width = name_width
+        );
+    }
+    println!();
+    Ok(())
+}
+
+async fn cmd_run_file(
+    idl_path: &str,
+    instruction_name: Option<&str>,
+    config: &Config,
+) -> Result<()> {
+    let parsed_idl = idl::parse_idl_file(idl_path)?;
+    let api_instructions = idl::idl_to_instructions(&parsed_idl);
+
+    if api_instructions.is_empty() {
+        bail!("No instructions found in IDL file.");
+    }
+
+    // Select instruction.
+    let idx = if let Some(name) = instruction_name {
+        api_instructions
+            .iter()
+            .position(|i| i.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Instruction '{name}' not found in IDL"))?
+    } else {
+        let items: Vec<String> = api_instructions.iter().map(|i| i.name.clone()).collect();
+        FuzzySelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select instruction")
+            .items(&items)
+            .default(0)
+            .interact()?
+    };
+
+    let ix = &api_instructions[idx];
+    let ix_idl = &parsed_idl.instructions[idx];
+
+    println!("\n{} {}\n", "Instruction:".bold(), ix.name.green().bold());
+
+    // Collect args (reuses existing prompt logic).
+    let args = collect_args(ix)?;
+
+    // Collect accounts using IDL PDA info.
+    let (accounts_full, fee_payer) =
+        collect_accounts_idl(ix_idl, &args, config, &parsed_idl.address)?;
+
+    // Summary.
+    println!(
+        "{}\n{}",
+        "\u{2500}".repeat(40).dimmed(),
+        "Summary".bold()
+    );
+    println!("  Instruction : {}", ix.name.cyan());
+    if !args.is_empty() {
+        println!("  Args        :");
+        for (k, v) in &args {
+            println!("    {} = {}", k.dimmed(), v);
+        }
+    }
+    println!("  Accounts    :");
+    for (name, pk, _, _) in &accounts_full {
+        println!("    {} = {}", name.dimmed(), pk);
+    }
+    println!("  Fee payer   : {}", fee_payer);
+    println!("{}", "\u{2500}".repeat(40).dimmed());
+    println!();
+
+    if !Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Build and sign transaction for '{}'?", ix.name))
+        .default(true)
+        .interact()?
+    {
+        println!("{}", "Aborted.".yellow());
+        return Ok(());
+    }
+
+    // Borsh-encode args.
+    let arg_bytes = idl::borsh_encode_args(&ix_idl.args, &args)?;
+    let instruction_data = idl::build_instruction_data(&ix_idl.discriminator, &arg_bytes);
+
+    // Build (pubkey, is_signer, is_writable) triples in IDL account order.
+    let account_triples: Vec<(String, bool, bool)> = accounts_full
+        .iter()
+        .map(|(_, pk, s, w)| (pk.clone(), *s, *w))
+        .collect();
+
+    // Encode binary Solana message (zeroed blockhash placeholder).
+    let unsigned_tx = solana::encode_unsigned_message(
+        &fee_payer,
+        &parsed_idl.address,
+        &account_triples,
+        &instruction_data,
+    )?;
+
+    println!("\n{} Transaction built successfully!\n", "\u{2713}".green().bold());
+    let network = infer_network(config.rpc());
+
+    if let Some(keypair_path) = &config.keypair_path {
+        println!("  Keypair found : {}", keypair_path.dimmed());
+        println!();
+        if Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Sign and send transaction to Solana?")
+            .default(true)
+            .interact()?
+        {
+            let spinner = indicatif::ProgressBar::new_spinner();
+            spinner.set_message("Signing and sending...");
+            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+            let result = solana::sign_and_send(
+                &unsigned_tx,
+                keypair_path,
+                config.rpc(),
+                &fee_payer,
+            )
+            .await;
+            spinner.finish_and_clear();
+            match result {
+                Ok(signature) => {
+                    println!("{} Transaction confirmed!", "\u{2713}".green().bold());
+                    println!("  Signature : {}", signature.cyan());
+                    let explorer = explorer_url(&signature, &network);
+                    println!("  Explorer  : {}", explorer.dimmed());
+                }
+                Err(e) => {
+                    println!("{} Failed to send: {e}", "\u{2717}".red().bold());
+                    println!("\n  Base58 tx (for manual signing):");
+                    println!("  {}", unsigned_tx.dimmed());
+                }
+            }
+        } else {
+            print_base58_tx(&unsigned_tx);
+        }
+    } else {
+        print_base58_tx(&unsigned_tx);
+    }
+
+    Ok(())
+}
+
+async fn cmd_pda_file(idl_path: &str, account_name: Option<&str>) -> Result<()> {
+    let parsed_idl = idl::parse_idl_file(idl_path)?;
+
+    // Collect all PDA accounts across all instructions (dedup by account name).
+    let mut pda_list: Vec<(&idl::IdlInstruction, &idl::IdlAccount)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for ix in &parsed_idl.instructions {
+        for acc in &ix.accounts {
+            if acc.pda.is_some() && seen.insert(acc.name.clone()) {
+                pda_list.push((ix, acc));
+            }
+        }
+    }
+
+    if pda_list.is_empty() {
+        println!("{}", "No PDA accounts found in IDL file.".yellow());
+        return Ok(());
+    }
+
+    let (ix, acc) = if let Some(name) = account_name {
+        pda_list
+            .iter()
+            .find(|(_, a)| a.name == name)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("PDA account '{name}' not found in IDL"))?
+    } else {
+        println!(
+            "\n{} {} PDA accounts  {}  ({})\n",
+            "\u{25b8}".cyan().bold(),
+            pda_list.len().to_string().bold(),
+            "(local IDL)".cyan(),
+            parsed_idl.address.dimmed()
+        );
+        let items: Vec<String> = pda_list
+            .iter()
+            .map(|(_, a)| {
+                let args: Vec<&str> = a
+                    .pda
+                    .as_ref()
+                    .map(|p| {
+                        p.seeds
+                            .iter()
+                            .filter(|s| s.kind != "const")
+                            .filter_map(|s| s.path.as_deref())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if args.is_empty() {
+                    a.name.clone()
+                } else {
+                    format!("{} ({})", a.name, args.join(", "))
+                }
+            })
+            .collect();
+        let sel = FuzzySelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select PDA account")
+            .items(&items)
+            .default(0)
+            .interact()?;
+        pda_list[sel]
+    };
+
+    let pda = acc.pda.as_ref().unwrap();
+    println!("\n{}", "Seed values".bold());
+
+    let mut seed_bytes_list: Vec<Vec<u8>> = Vec::new();
+    for seed in &pda.seeds {
+        match seed.kind.as_str() {
+            "const" => {
+                let bytes = seed.value.clone().unwrap_or_default();
+                let label =
+                    String::from_utf8(bytes.clone()).unwrap_or_else(|_| format!("{bytes:?}"));
+                println!("  {} {}", "const".dimmed(), label.green());
+                seed_bytes_list.push(bytes);
+            }
+            "arg" => {
+                let name = seed.path.as_deref().unwrap_or("value");
+                let ty = ix
+                    .args
+                    .iter()
+                    .find(|a| a.name == name)
+                    .and_then(|a| match &a.ty {
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "string".to_string());
+                let raw: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt(format!("{} ({})", name.cyan(), ty.dimmed()))
+                    .interact_text()?;
+                let coerced = coerce_value(&raw, &ty);
+                let bytes = idl::seed_bytes_from_value(&coerced, &ty)
+                    .with_context(|| format!("Encoding seed '{name}' as {ty}"))?;
+                seed_bytes_list.push(bytes);
+            }
+            "account" => {
+                let name = seed.path.as_deref().unwrap_or("account");
+                let raw: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt(format!("{} ({})", name.cyan(), "publicKey".dimmed()))
+                    .interact_text()?;
+                let bytes = bs58::decode(&raw)
+                    .into_vec()
+                    .with_context(|| format!("Invalid pubkey for seed '{name}': {raw}"))?;
+                anyhow::ensure!(bytes.len() == 32, "Pubkey must decode to 32 bytes");
+                seed_bytes_list.push(bytes);
+            }
+            other => bail!("Unknown seed kind '{other}' in IDL"),
+        }
+    }
+
+    println!();
+    let (address, bump) = solana::find_program_address(&seed_bytes_list, &parsed_idl.address)?;
+
+    println!("{} PDA derived!\n", "\u{2713}".green().bold());
+    println!("  {:<10} {}", "Address:".bold(), address.cyan().bold());
+    println!("  {:<10} {}", "Bump:".bold(), bump.to_string().yellow());
+    println!("  {:<10} {}", "Program:".bold(), parsed_idl.address.dimmed());
+    println!();
+    Ok(())
+}
+
+/// Collect instruction accounts using IDL PDA definitions.
+/// Auto-fills fixed-address accounts and auto-derives PDA accounts when all
+/// seeds are available.  Returns `(Vec<(name, pubkey, is_signer, is_writable)>, fee_payer)`.
+fn collect_accounts_idl(
+    ix_idl: &idl::IdlInstruction,
+    args: &HashMap<String, serde_json::Value>,
+    config: &Config,
+    program_id: &str,
+) -> Result<(Vec<(String, String, bool, bool)>, String)> {
+    let keypair_pubkey = config
+        .keypair_path
+        .as_deref()
+        .and_then(|p| solana::pubkey_from_keypair_file(p).ok());
+
+    // Ordered: (account_name, pubkey, is_signer, is_writable)
+    let mut collected: Vec<(String, String, bool, bool)> = Vec::new();
+    // name -> pubkey map for PDA seed resolution as we go
+    let mut collected_map: HashMap<String, String> = HashMap::new();
+    let mut fee_payer = String::new();
+
+    println!("{}", "Accounts".bold().underline());
+
+    for acc in &ix_idl.accounts {
+        // Fixed-address account (system_program, token_program, etc.)
+        if let Some(fixed_addr) = &acc.address {
+            println!(
+                "  {} {} {}",
+                acc.name.cyan(),
+                "=".dimmed(),
+                fixed_addr.dimmed()
+            );
+            collected.push((acc.name.clone(), fixed_addr.clone(), acc.signer, acc.writable));
+            collected_map.insert(acc.name.clone(), fixed_addr.clone());
+            continue;
+        }
+
+        // PDA account — try to auto-derive from seeds we already have.
+        if let Some(pda) = &acc.pda {
+            if let Some(seed_bytes) =
+                idl::resolve_pda_seeds(pda, ix_idl, &collected_map, args)
+            {
+                match solana::find_program_address(&seed_bytes, program_id) {
+                    Ok((addr, _)) => {
+                        println!(
+                            "  {} {} {} {}",
+                            acc.name.cyan(),
+                            "=".dimmed(),
+                            addr.green(),
+                            "(auto-derived)".dimmed()
+                        );
+                        collected.push((
+                            acc.name.clone(),
+                            addr.clone(),
+                            acc.signer,
+                            acc.writable,
+                        ));
+                        collected_map.insert(acc.name.clone(), addr);
+                        continue;
+                    }
+                    Err(e) => {
+                        println!(
+                            "  {} {}",
+                            acc.name.yellow(),
+                            format!("(PDA derivation failed — {e}, enter manually)").dimmed()
+                        );
+                    }
+                }
+            }
+        }
+
+        // Prompt the user.
+        let tmp = InstructionAccount {
+            name: acc.name.clone(),
+            is_mut: acc.writable,
+            is_signer: acc.signer,
+            is_optional: false,
+            pda: None,
+        };
+        let val = prompt_account(&tmp, keypair_pubkey.as_deref())?;
+        if fee_payer.is_empty()
+            && (acc.signer
+                || acc.name.to_lowercase().contains("authority")
+                || acc.name.to_lowercase().contains("payer"))
+        {
+            fee_payer = val.clone();
+        }
+        collected.push((acc.name.clone(), val.clone(), acc.signer, acc.writable));
+        collected_map.insert(acc.name.clone(), val);
+    }
+    println!();
+
+    if fee_payer.is_empty() {
+        fee_payer = if let Some(pk) = &keypair_pubkey {
+            pk.clone()
+        } else {
+            Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Fee payer public key")
+                .interact_text()?
+        };
+    }
+
+    Ok((collected, fee_payer))
 }

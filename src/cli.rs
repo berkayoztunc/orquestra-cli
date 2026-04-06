@@ -69,4 +69,8 @@ pub struct ConfigSetArgs {
     /// Orquestra API base URL (default: https://api.orquestra.build)
     #[arg(long)]
     pub api_base: Option<String>,
+
+    /// Path to a local Solana IDL JSON file (enables offline/file mode)
+    #[arg(long)]
+    pub idl: Option<String>,
 }

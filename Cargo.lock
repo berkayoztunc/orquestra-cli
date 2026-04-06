@@ -880,13 +880,14 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "orquestra"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
  "bs58",
  "clap",
  "colored",
+ "curve25519-dalek",
  "dialoguer",
  "dirs",
  "ed25519-dalek",
@@ -894,6 +895,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "toml",
 ]
