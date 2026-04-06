@@ -176,6 +176,8 @@ pub struct BuildRequest {
 #[allow(dead_code)]
 pub struct BuildResponse {
     pub transaction: String,
+    #[serde(rename = "serializedTransaction")]
+    pub serialized_transaction: Option<String>,
     pub message: Option<String>,
     #[serde(rename = "estimatedFee")]
     pub estimated_fee: Option<u64>,

@@ -425,25 +425,30 @@ fn extract_message_bytes(tx_bytes: &[u8]) -> Result<Vec<u8>> {
         bail!("Transaction payload is empty");
     }
 
-    // Attempt 1: treat whole payload as a raw unsigned message (most common from
-    // transaction-builder APIs that return a message without a prepended signature
-    // section).  Validate by computing the blockhash offset — if it lands inside
-    // the buffer this interpretation is correct.
-    if blockhash_offset(tx_bytes).is_ok() {
-        return Ok(tx_bytes.to_vec());
-    }
-
-    // Attempt 2: treat as a full wire transaction whose first compact-u16 encodes
-    // the number of existing signatures.  Strip that section and validate again.
+    // Attempt 1: treat as a full wire transaction whose first compact-u16 encodes
+    // the number of existing signatures.  Strip that section and validate the
+    // remaining bytes as a message.  This is tried first because a wire tx with
+    // 1 signature (the common case) starts with 0x01 which also happens to look
+    // like a valid legacy-message header (num_signers=1, 0 accounts), causing the
+    // raw-message path below to pass with a garbage blockhash offset.
     if let Ok((sig_count, sig_count_len)) = read_compact_u16(tx_bytes, 0) {
-        if let Some(sigs_end) = sig_count_len.checked_add((sig_count as usize).saturating_mul(64)) {
-            if sigs_end < tx_bytes.len() {
-                let candidate = &tx_bytes[sigs_end..];
-                if blockhash_offset(candidate).is_ok() {
-                    return Ok(candidate.to_vec());
+        if sig_count > 0 {
+            if let Some(sigs_end) = sig_count_len.checked_add((sig_count as usize).saturating_mul(64)) {
+                if sigs_end < tx_bytes.len() {
+                    let candidate = &tx_bytes[sigs_end..];
+                    if blockhash_offset(candidate).is_ok() {
+                        return Ok(candidate.to_vec());
+                    }
                 }
             }
         }
+    }
+
+    // Attempt 2: treat whole payload as a raw unsigned message (produced by
+    // encode_unsigned_message or similar APIs that return a message directly
+    // without a prepended signature section).
+    if blockhash_offset(tx_bytes).is_ok() {
+        return Ok(tx_bytes.to_vec());
     }
 
     let hex_preview: String = tx_bytes
