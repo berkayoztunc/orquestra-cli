@@ -21,6 +21,7 @@ pub async fn cmd_menu(config: &Config) -> Result<()> {
         "List     — show all instructions",
         "Run      — run an instruction",
         "Find PDA  — derive a program-derived address",
+        "Sign tx  — sign and send a serialized transaction",
         "Config   — view or update configuration",
         "Quit",
     ];
@@ -35,7 +36,8 @@ pub async fn cmd_menu(config: &Config) -> Result<()> {
         0 => cmd_list(config).await?,
         1 => cmd_run(config, None).await?,
         2 => cmd_pda(config, None).await?,
-        3 => cmd_config_menu().await?,
+        3 => cmd_sign_tx(config).await?,
+        4 => cmd_config_menu().await?,
         _ => println!("{}", "Goodbye.".dimmed()),
     }
 
@@ -218,6 +220,9 @@ pub async fn cmd_run(config: &Config, instruction_name: Option<&str>) -> Result<
     if let Some(fee) = build.estimated_fee {
         println!("  Estimated fee : {} lamports", fee.to_string().yellow());
     }
+    if let Some(serialized) = &build.serialized_transaction {
+        println!("  Serialized tx : {}", serialized.dimmed());
+    }
 
     // Sign & send if keypair is configured
     if let Some(keypair_path) = &config.keypair_path {
@@ -233,8 +238,9 @@ pub async fn cmd_run(config: &Config, instruction_name: Option<&str>) -> Result<
             spinner.set_message("Signing and sending...");
             spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
+            let tx_to_send = build.serialized_transaction.as_deref().unwrap_or(&build.transaction);
             let result = solana::sign_and_send(
-                &build.transaction,
+                tx_to_send,
                 keypair_path,
                 config.rpc(),
                 &fee_payer,
@@ -252,14 +258,14 @@ pub async fn cmd_run(config: &Config, instruction_name: Option<&str>) -> Result<
                 Err(e) => {
                     println!("{} Failed to send: {e}", "✗".red().bold());
                     println!("\n  Base58 tx (for manual signing):");
-                    println!("  {}", build.transaction.dimmed());
+                    println!("  {}", build.serialized_transaction.as_deref().unwrap_or(&build.transaction).dimmed());
                 }
             }
         } else {
-            print_base58_tx(&build.transaction);
+            print_base58_tx(build.serialized_transaction.as_deref().unwrap_or(&build.transaction));
         }
     } else {
-        print_base58_tx(&build.transaction);
+        print_base58_tx(build.serialized_transaction.as_deref().unwrap_or(&build.transaction));
     }
 
     Ok(())
@@ -517,6 +523,51 @@ pub async fn cmd_config_reset() -> Result<()> {
 
     println!("\n{} Config saved.\n", "✓".green().bold());
     println!("{}", config.display());
+    Ok(())
+}
+
+pub async fn cmd_sign_tx(config: &Config) -> Result<()> {
+    let serialized_tx: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Serialized tx (base58)")
+        .interact_text()?;
+
+    let keypair_path = match &config.keypair_path {
+        Some(p) => p.clone(),
+        None => {
+            bail!("No keypair configured. Run 'orquestra config' to set a keypair path.");
+        }
+    };
+
+    let fee_payer = solana::pubkey_from_keypair_file(&keypair_path)
+        .context("Failed to read public key from keypair file")?;
+
+    let network = infer_network(config.rpc());
+
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.set_message("Signing and sending...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
+    let result = solana::sign_and_send(
+        &serialized_tx,
+        &keypair_path,
+        config.rpc(),
+        &fee_payer,
+    )
+    .await;
+    spinner.finish_and_clear();
+
+    match result {
+        Ok(signature) => {
+            println!("{} Transaction confirmed!", "✓".green().bold());
+            println!("  Signature : {}", signature.cyan());
+            let explorer = explorer_url(&signature, &network);
+            println!("  Explorer  : {}", explorer.dimmed());
+        }
+        Err(e) => {
+            println!("{} Failed to send: {e}", "✗".red().bold());
+        }
+    }
+
     Ok(())
 }
 
