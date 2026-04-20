@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.5] - 2026-04-21
+
+### Added
+
+- Non-interactive execution options for CLI commands.
+
+### Changed
+
+- Refined and clarified `SKILL.md` usage guidance and agent execution instructions.
+
+---
+
 ## [0.2.4] - 2026-04-21
 
 ### Fixed
@@ -78,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `orquestra config set / show / reset` for persistent TOML-based configuration.
 - Homebrew tap formula and GitHub Actions release pipeline for macOS arm64/x86_64 and Linux x86_64/arm64 binaries.
 
+[0.2.5]: https://github.com/berkayoztunc/orquestra-cli/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/berkayoztunc/orquestra-cli/compare/v0.2.2...v0.2.4
+[0.2.2]: https://github.com/berkayoztunc/orquestra-cli/compare/v0.2.1...v0.2.2
 [0.2.0]: https://github.com/berkayoztunc/orquestra-cli/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/berkayoztunc/orquestra-cli/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/berkayoztunc/orquestra-cli/releases/tag/v0.1.0
