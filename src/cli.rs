@@ -21,12 +21,31 @@ pub enum Commands {
     Run {
         /// Instruction name to run directly (skips selection menu)
         instruction: Option<String>,
+
+        /// Pre-fill an instruction argument without prompting, e.g. --arg amount=100
+        /// Can be repeated for multiple args.
+        #[arg(long = "arg", value_name = "KEY=VALUE", action = clap::ArgAction::Append)]
+        args: Vec<String>,
+
+        /// Pre-fill an account address without prompting, e.g. --account counter=ABC...
+        /// Can be repeated for multiple accounts.
+        #[arg(long = "account", value_name = "NAME=ADDRESS", action = clap::ArgAction::Append)]
+        accounts: Vec<String>,
+
+        /// Auto-confirm all prompts (build and send without asking)
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// Find and derive program-derived addresses (PDAs)
     Pda {
         /// PDA account name to derive directly (skips selection menu)
         account: Option<String>,
+
+        /// Pre-fill a seed value without prompting, e.g. --seed owner=ABC...
+        /// Can be repeated for multiple seeds.
+        #[arg(long = "seed", value_name = "NAME=VALUE", action = clap::ArgAction::Append)]
+        seeds: Vec<String>,
     },
 
     /// Sign and send a base58-encoded serialized transaction
@@ -39,6 +58,10 @@ pub enum Commands {
     Search {
         /// Search query (prompts interactively if omitted)
         query: Option<String>,
+
+        /// Auto-confirm setting the selected program as active project
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// Simulate a transaction without sending it (shows logs and compute units)

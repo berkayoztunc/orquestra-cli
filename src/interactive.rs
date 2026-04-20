@@ -8,6 +8,23 @@ use crate::config::Config;
 use crate::idl;
 use crate::solana;
 
+/// Options for non-interactive (direct) execution of `orquestra run`.
+/// Any field left empty falls back to interactive prompting.
+pub struct RunOpts {
+    /// Pre-filled argument values keyed by arg name.
+    pub args: HashMap<String, String>,
+    /// Pre-filled account addresses keyed by account name.
+    pub accounts: HashMap<String, String>,
+    /// When true, auto-confirm all yes/no prompts.
+    pub yes: bool,
+}
+
+impl RunOpts {
+    pub fn interactive() -> Self {
+        Self { args: HashMap::new(), accounts: HashMap::new(), yes: false }
+    }
+}
+
 // ── Top-level interactive menu ────────────────────────────────────────────────
 
 pub async fn cmd_menu(config: &Config) -> Result<()> {
@@ -37,12 +54,12 @@ pub async fn cmd_menu(config: &Config) -> Result<()> {
 
     match selection {
         0 => cmd_list(config).await?,
-        1 => cmd_run(config, None).await?,
-        2 => cmd_pda(config, None).await?,
+        1 => cmd_run(config, None, RunOpts::interactive()).await?,
+        2 => cmd_pda(config, None, HashMap::new()).await?,
         3 => cmd_sign_tx(config).await?,
         4 => cmd_simulate(config, None).await?,
         5 => cmd_tx(config, None).await?,
-        6 => cmd_search(config, None).await?,
+        6 => cmd_search(config, None, false).await?,
         7 => cmd_config_menu().await?,
         _ => println!("{}", "Goodbye.".dimmed()),
     }
@@ -101,10 +118,10 @@ pub async fn cmd_list(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_run(config: &Config, instruction_name: Option<&str>) -> Result<()> {
+pub async fn cmd_run(config: &Config, instruction_name: Option<&str>, opts: RunOpts) -> Result<()> {
     // File mode: build transaction locally from IDL, no API call.
     if let Some(idl_path) = &config.idl_path {
-        return cmd_run_file(idl_path, instruction_name, config).await;
+        return cmd_run_file(idl_path, instruction_name, config, opts).await;
     }
 
     let program_address = config.require_project_id()?;
@@ -164,10 +181,10 @@ pub async fn cmd_run(config: &Config, instruction_name: Option<&str>) -> Result<
     }
 
     // Collect args
-    let args = collect_args(&ix)?;
+    let args = collect_args(&ix, &opts.args)?;
 
     // Collect accounts
-    let (accounts, fee_payer) = collect_accounts(&ix, config)?;
+    let (accounts, fee_payer) = collect_accounts(&ix, config, &opts.accounts)?;
 
     // Confirm
     println!();
@@ -188,7 +205,7 @@ pub async fn cmd_run(config: &Config, instruction_name: Option<&str>) -> Result<
     println!("{}", "─".repeat(40).dimmed());
     println!();
 
-    if !Confirm::with_theme(&ColorfulTheme::default())
+    if !opts.yes && !Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt(format!("Build transaction for '{}'?", ix.name))
         .default(true)
         .interact()?
@@ -235,7 +252,7 @@ pub async fn cmd_run(config: &Config, instruction_name: Option<&str>) -> Result<
         println!("  Keypair found : {}", keypair_path.dimmed());
         println!();
 
-        if Confirm::with_theme(&ColorfulTheme::default())
+        if opts.yes || Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt("Sign and send transaction to Solana?")
             .default(true)
             .interact()?
@@ -277,7 +294,7 @@ pub async fn cmd_run(config: &Config, instruction_name: Option<&str>) -> Result<
     Ok(())
 }
 
-fn collect_args(ix: &Instruction) -> Result<HashMap<String, serde_json::Value>> {
+fn collect_args(ix: &Instruction, preset: &HashMap<String, String>) -> Result<HashMap<String, serde_json::Value>> {
     if ix.args.is_empty() {
         return Ok(HashMap::new());
     }
@@ -285,7 +302,13 @@ fn collect_args(ix: &Instruction) -> Result<HashMap<String, serde_json::Value>> 
     println!("{}", "Arguments".bold().underline());
     let mut map = HashMap::new();
     for arg in &ix.args {
-        let value = prompt_arg(arg)?;
+        let value = if let Some(pre) = preset.get(&arg.name) {
+            let ty_str = arg.ty.to_string();
+            println!("  {} ({}) = {}", arg.name.green(), ty_str.dimmed(), pre.yellow());
+            coerce_value(pre, &ty_str)
+        } else {
+            prompt_arg(arg)?
+        };
         map.insert(arg.name.clone(), value);
     }
     println!();
@@ -336,6 +359,7 @@ fn coerce_value(raw: &str, ty: &str) -> serde_json::Value {
 fn collect_accounts(
     ix: &Instruction,
     config: &Config,
+    accounts_preset: &HashMap<String, String>,
 ) -> Result<(HashMap<String, String>, String)> {
     // Determine fee_payer from keypair if available
     let keypair_pubkey = config
@@ -349,7 +373,12 @@ fn collect_accounts(
     if !ix.accounts.is_empty() {
         println!("{}", "Accounts".bold().underline());
         for acc in &ix.accounts {
-            let val = prompt_account(acc, keypair_pubkey.as_deref())?;
+            let val = if let Some(pre) = accounts_preset.get(&acc.name) {
+                println!("  {} = {}", acc.name.cyan(), pre.yellow());
+                pre.clone()
+            } else {
+                prompt_account(acc, keypair_pubkey.as_deref())?
+            };
             if fee_payer.is_empty() && (acc.is_signer || acc.name.to_lowercase().contains("authority") || acc.name.to_lowercase().contains("payer")) {
                 fee_payer = val.clone();
             }
@@ -624,7 +653,7 @@ fn non_empty(s: String) -> Option<String> {
 
 // ── Program search ───────────────────────────────────────────────────────────
 
-pub async fn cmd_search(config: &Config, query: Option<&str>) -> Result<()> {
+pub async fn cmd_search(config: &Config, query: Option<&str>, yes: bool) -> Result<()> {
     let q: String = match query {
         Some(q) => q.to_string(),
         None => Input::with_theme(&ColorfulTheme::default())
@@ -694,7 +723,7 @@ pub async fn cmd_search(config: &Config, query: Option<&str>) -> Result<()> {
                 "Program:".bold(), chosen.name.cyan(),
                 "ID:".bold(), chosen.program_id.dimmed(),
             );
-            let confirm = Confirm::with_theme(&ColorfulTheme::default())
+            let confirm = yes || Confirm::with_theme(&ColorfulTheme::default())
                 .with_prompt(format!("Set '{}' as active project in config?", chosen.name))
                 .default(true)
                 .interact()?;
@@ -705,7 +734,6 @@ pub async fn cmd_search(config: &Config, query: Option<&str>) -> Result<()> {
                 cfg.save()?;
                 println!("{} project_id set to {}", "✓".green().bold(), chosen.program_id.cyan());
             }
-            return Ok(());
         }
 
         // Nav / cancel actions
@@ -723,10 +751,10 @@ pub async fn cmd_search(config: &Config, query: Option<&str>) -> Result<()> {
 
 // ── PDA finder ────────────────────────────────────────────────────────────────
 
-pub async fn cmd_pda(config: &Config, account_name: Option<&str>) -> Result<()> {
+pub async fn cmd_pda(config: &Config, account_name: Option<&str>, seeds_preset: HashMap<String, String>) -> Result<()> {
     // File mode: derive PDA locally, no API call.
     if let Some(idl_path) = &config.idl_path {
-        return cmd_pda_file(idl_path, account_name).await;
+        return cmd_pda_file(idl_path, account_name, seeds_preset).await;
     }
 
     let program_address = config.require_project_id()?;
@@ -817,10 +845,15 @@ pub async fn cmd_pda(config: &Config, account_name: Option<&str>) -> Result<()> 
         for seed in &arg_seeds {
             let name = seed.name.as_deref().unwrap_or("value");
             let ty = if seed.kind == "account" { "publicKey" } else { seed.ty.as_deref().unwrap_or("string") };
-            let theme = ColorfulTheme::default();
-            let value: String = Input::with_theme(&theme)
-                .with_prompt(format!("{name} ({ty})"))
-                .interact_text()?;
+            let value: String = if let Some(pre) = seeds_preset.get(name) {
+                println!("  {} ({}) = {}", name.cyan(), ty.dimmed(), pre.yellow());
+                pre.clone()
+            } else {
+                let theme = ColorfulTheme::default();
+                Input::with_theme(&theme)
+                    .with_prompt(format!("{name} ({ty})"))
+                    .interact_text()?
+            };
             args.insert(name.to_string(), value);
         }
     }
@@ -912,6 +945,7 @@ async fn cmd_run_file(
     idl_path: &str,
     instruction_name: Option<&str>,
     config: &Config,
+    opts: RunOpts,
 ) -> Result<()> {
     let parsed_idl = idl::parse_idl_file(idl_path)?;
     let api_instructions = idl::idl_to_instructions(&parsed_idl);
@@ -941,7 +975,7 @@ async fn cmd_run_file(
     println!("\n{} {}\n", "Instruction:".bold(), ix.name.green().bold());
 
     // Collect args (reuses existing prompt logic).
-    let args = collect_args(ix)?;
+    let args = collect_args(ix, &opts.args)?;
 
     // Collect accounts using IDL PDA info.
     let (accounts_full, fee_payer) =
@@ -968,7 +1002,7 @@ async fn cmd_run_file(
     println!("{}", "\u{2500}".repeat(40).dimmed());
     println!();
 
-    if !Confirm::with_theme(&ColorfulTheme::default())
+    if !opts.yes && !Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt(format!("Build and sign transaction for '{}'?", ix.name))
         .default(true)
         .interact()?
@@ -1001,7 +1035,7 @@ async fn cmd_run_file(
     if let Some(keypair_path) = &config.keypair_path {
         println!("  Keypair found : {}", keypair_path.dimmed());
         println!();
-        if Confirm::with_theme(&ColorfulTheme::default())
+        if opts.yes || Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt("Sign and send transaction to Solana?")
             .default(true)
             .interact()?
@@ -1040,7 +1074,7 @@ async fn cmd_run_file(
     Ok(())
 }
 
-async fn cmd_pda_file(idl_path: &str, account_name: Option<&str>) -> Result<()> {
+async fn cmd_pda_file(idl_path: &str, account_name: Option<&str>, seeds_preset: HashMap<String, String>) -> Result<()> {
     let parsed_idl = idl::parse_idl_file(idl_path)?;
 
     // Collect all PDA accounts across all instructions (dedup by account name).
@@ -1126,9 +1160,14 @@ async fn cmd_pda_file(idl_path: &str, account_name: Option<&str>) -> Result<()> 
                         _ => None,
                     })
                     .unwrap_or_else(|| "string".to_string());
-                let raw: String = Input::with_theme(&ColorfulTheme::default())
-                    .with_prompt(format!("{} ({})", name.cyan(), ty.dimmed()))
-                    .interact_text()?;
+                let raw: String = if let Some(pre) = seeds_preset.get(name) {
+                    println!("  {} ({}) = {}", name.cyan(), ty.dimmed(), pre.yellow());
+                    pre.clone()
+                } else {
+                    Input::with_theme(&ColorfulTheme::default())
+                        .with_prompt(format!("{} ({})", name.cyan(), ty.dimmed()))
+                        .interact_text()?
+                };
                 let coerced = coerce_value(&raw, &ty);
                 let bytes = idl::seed_bytes_from_value(&coerced, &ty)
                     .with_context(|| format!("Encoding seed '{name}' as {ty}"))?;
@@ -1136,9 +1175,14 @@ async fn cmd_pda_file(idl_path: &str, account_name: Option<&str>) -> Result<()> 
             }
             "account" => {
                 let name = seed.path.as_deref().unwrap_or("account");
-                let raw: String = Input::with_theme(&ColorfulTheme::default())
-                    .with_prompt(format!("{} ({})", name.cyan(), "publicKey".dimmed()))
-                    .interact_text()?;
+                let raw: String = if let Some(pre) = seeds_preset.get(name) {
+                    println!("  {} (publicKey) = {}", name.cyan(), pre.yellow());
+                    pre.clone()
+                } else {
+                    Input::with_theme(&ColorfulTheme::default())
+                        .with_prompt(format!("{} ({})", name.cyan(), "publicKey".dimmed()))
+                        .interact_text()?
+                };
                 let bytes = bs58::decode(&raw)
                     .into_vec()
                     .with_context(|| format!("Invalid pubkey for seed '{name}': {raw}"))?;

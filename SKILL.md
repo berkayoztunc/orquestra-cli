@@ -55,15 +55,28 @@ Lists all instructions available in the configured program.
 ```bash
 orquestra run                  # interactive fuzzy-select
 orquestra run <instruction>    # run directly by name, e.g. orquestra run initialize
+
+# Non-interactive (direct) — no prompts, no TTY required:
+orquestra run <instruction> \
+  --arg <name>=<value> \       # repeat for each arg
+  --account <name>=<address> \ # repeat for each account
+  --yes                        # auto-confirm build + send
 ```
 Prompts for args and accounts, shows a summary, builds the transaction, then signs and sends if a keypair is configured. If no keypair, outputs the base58 serialized transaction.
+
+When `--arg` / `--account` / `--yes` flags are supplied, all matching prompts are skipped; any value not covered by a flag still falls back to interactive input.
 
 ### Derive a PDA
 ```bash
 orquestra pda                  # interactive select
 orquestra pda <account-name>   # derive by account name directly
+
+# Non-interactive (direct) — no prompts, no TTY required:
+orquestra pda <account-name> \
+  --seed <name>=<value>        # repeat for each seed (arg/account seeds)
 ```
 Prompts for seeds and derives the program-derived address.
+`const` seeds are always derived automatically.
 
 ### Sign and send a transaction
 ```bash
@@ -89,6 +102,7 @@ Fetches and displays transaction details, status, and logs.
 ```bash
 orquestra search               # prompts for query
 orquestra search <query>       # search directly, e.g. orquestra search "token swap"
+orquestra search <query> --yes # auto-confirm setting found program as active project
 ```
 Searches programs indexed on orquestra.dev.
 
@@ -149,19 +163,54 @@ orquestra simulate <BASE58_TX>
 
 ## Agent execution guide — handling interactive prompts
 
-`orquestra run`, `orquestra pda`, and the bare `orquestra` menu all use interactive prompts (dialoguer). **Never tell the user to run the command themselves.** Instead, drive the prompts programmatically using `run_in_terminal` + `send_to_terminal`.
+`orquestra run`, `orquestra pda`, and the bare `orquestra` menu support two execution modes:
 
-### How to execute an interactive command
+### Mode 1 — Direct (preferred for agents)
+
+Pass all values as CLI flags. **No TTY, no prompts, no `send_to_terminal` loop needed.**
+
+```bash
+orquestra run <instruction> \
+  --arg <name>=<value> \
+  --account <name>=<address> \
+  --yes
+```
+
+- `--arg KEY=VALUE` — pre-fills an instruction argument (repeat for each arg).
+- `--account NAME=ADDRESS` — pre-fills an account address (repeat for each account).
+- `--yes` — auto-confirms "Build transaction?" and "Sign and send?" prompts.
+- Any arg/account **not** covered by a flag falls back to interactive prompting.
+- Signer accounts default to the configured keypair pubkey — omit `--account` for them when a keypair is set.
+
+**Example — fully non-interactive:**
+```bash
+orquestra run transfer \
+  --arg amount=1000000 \
+  --account recipient=ABC123... \
+  --yes
+```
+
+**Example — partial pre-fill (only some values known):**
+```bash
+orquestra run initialize --account authority=ABC123... --yes
+# → will still prompt for any args not covered by --arg flags
+```
+
+### Mode 2 — Interactive (TTY required)
+
+Use `run_in_terminal` + `send_to_terminal` when direct flags cannot be used (e.g., value is only known after a previous prompt, or the instruction name must be fuzzy-selected).
+
+#### How to drive interactive prompts
 
 1. Start the command with `run_in_terminal`, `mode=sync`, short timeout (e.g. `5000` ms). It will time out while waiting for input and return a terminal `id`.
 2. Call `get_terminal_output` with that `id` to read the current prompt.
-3. Call `send_to_terminal` with the `id` to answer the prompt — **one answer per call**, exactly matching what the prompt expects.
+3. Call `send_to_terminal` with the `id` to answer the prompt — **one answer per call**.
 4. After each send, call `get_terminal_output` again to read the next prompt.
 5. Repeat until the command exits (output shows a signature/explorer link or an error).
 
-### Prompt sequence for `orquestra run <instruction>`
+#### Prompt sequence for `orquestra run <instruction>`
 
-Always pass the instruction name directly (e.g. `orquestra run initialize`) to **skip** the FuzzySelect menu — the menu requires arrow keys which cannot be automated. With the name provided, prompts appear in this order:
+Always pass the instruction name directly (e.g. `orquestra run initialize`) to **skip** the FuzzySelect menu — the menu requires arrow keys which cannot be automated.
 
 | Step | Prompt looks like | What to send |
 |------|-------------------|--------------|
@@ -172,7 +221,12 @@ Always pass the instruction name directly (e.g. `orquestra run initialize`) to *
 
 If the instruction has **no args**, step 1 is skipped entirely.
 
-### Prompt sequence for `orquestra pda <account-name>`
+**Example — fully non-interactive PDA derivation:**
+```bash
+orquestra pda counter --seed owner=ABC123...
+```
+
+#### Prompt sequence for `orquestra pda <account-name>` (interactive fallback)
 
 | Step | Prompt looks like | What to send |
 |------|-------------------|--------------|
@@ -180,23 +234,8 @@ If the instruction has **no args**, step 1 is skipped entirely.
 
 The derived address is printed to stdout after all seeds are entered.
 
-### Example (agent drives `orquestra run <instruction>`)
-
-```
-run_in_terminal("orquestra run <instruction>", mode=sync, timeout=5000)
-# → returns terminal id, output shows first account/arg prompt
-send_to_terminal(id, "<VALUE>\n")   # answer first prompt
-# → get_terminal_output shows: "<signer_account> [signer]: <KEYPAIR_PUBKEY>"
-send_to_terminal(id, "\n")          # accept default signer
-# → get_terminal_output shows: "Build transaction for '<instruction>'? [Y/n]"
-send_to_terminal(id, "\n")          # confirm build
-# → get_terminal_output shows: "Sign and send transaction to Solana? [Y/n]"
-send_to_terminal(id, "\n")          # confirm send
-# → get_terminal_output shows signature + explorer link
-```
-
 ### Do not do this
 
-- Do **not** tell the user "this requires an interactive terminal, please run it yourself".
+- Do **not** tell the user "this requires an interactive terminal, please run it yourself" — use direct mode instead.
 - Do **not** use bare `orquestra run` without an instruction name — the FuzzySelect cannot be driven non-interactively.
 - Do **not** send multiple answers in a single `send_to_terminal` call.

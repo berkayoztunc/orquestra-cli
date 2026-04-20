@@ -10,6 +10,19 @@ use clap::Parser;
 use cli::{Cli, Commands, ConfigAction, IdlAction};
 use colored::Colorize;
 use config::Config;
+use interactive::RunOpts;
+use std::collections::HashMap;
+
+fn parse_kv_pairs(pairs: &[String]) -> Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for pair in pairs {
+        let (k, v) = pair.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("Invalid key=value pair: '{pair}'. Expected format: KEY=VALUE")
+        })?;
+        map.insert(k.trim().to_string(), v.trim().to_string());
+    }
+    Ok(map)
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,14 +39,20 @@ async fn main() -> Result<()> {
             interactive::cmd_list(&config).await?;
         }
 
-        Some(Commands::Run { instruction }) => {
+        Some(Commands::Run { instruction, args, accounts, yes }) => {
             let config = Config::load()?;
-            interactive::cmd_run(&config, instruction.as_deref()).await?;
+            let opts = RunOpts {
+                args: parse_kv_pairs(&args)?,
+                accounts: parse_kv_pairs(&accounts)?,
+                yes,
+            };
+            interactive::cmd_run(&config, instruction.as_deref(), opts).await?;
         }
 
-        Some(Commands::Pda { account }) => {
+        Some(Commands::Pda { account, seeds }) => {
             let config = Config::load()?;
-            interactive::cmd_pda(&config, account.as_deref()).await?;
+            let seeds_map = parse_kv_pairs(&seeds)?;
+            interactive::cmd_pda(&config, account.as_deref(), seeds_map).await?;
         }
 
         Some(Commands::Sign { tx }) => {
@@ -41,9 +60,9 @@ async fn main() -> Result<()> {
             interactive::cmd_sign_tx_direct(&config, &tx).await?;
         }
 
-        Some(Commands::Search { query }) => {
+        Some(Commands::Search { query, yes }) => {
             let config = Config::load()?;
-            interactive::cmd_search(&config, query.as_deref()).await?;
+            interactive::cmd_search(&config, query.as_deref(), yes).await?;
         }
 
         Some(Commands::Simulate { tx }) => {
