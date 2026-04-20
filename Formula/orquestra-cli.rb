@@ -1,16 +1,16 @@
 class OrquestraCli < Formula
   desc "CLI for interacting with Solana programs via orquestra.dev"
   homepage "https://github.com/berkayoztunc/orquestra-cli"
-  version "0.2.4"
+  version "0.2.5"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/berkayoztunc/orquestra-cli/releases/download/v#{version}/orquestra-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "ff359ea6d1e318c8fdbce564d38b625f53fd1cf77155a8c6b3d30d3913b8503b"
+      sha256 "e1f464b647b3d723a4887cff5f531e9861b31af0881b87fc7a18415a33c9242a"
     else
       url "https://github.com/berkayoztunc/orquestra-cli/releases/download/v#{version}/orquestra-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "27711d4c035c912676c0fe574d7ddc052e6063c3f771c22577e2ed4f274b783a"
+      sha256 "b3cce9662f52af1acacde83f834a82ca4d7dd56e8054dcfe8273ec310eb787bb"
     end
   end
 
