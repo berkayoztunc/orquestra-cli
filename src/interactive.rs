@@ -22,6 +22,7 @@ pub async fn cmd_menu(config: &Config) -> Result<()> {
         "Run      — run an instruction",
         "Find PDA  — derive a program-derived address",
         "Sign tx  — sign and send a serialized transaction",
+        "Search   — search programs on orquestra",
         "Config   — view or update configuration",
         "Quit",
     ];
@@ -37,7 +38,8 @@ pub async fn cmd_menu(config: &Config) -> Result<()> {
         1 => cmd_run(config, None).await?,
         2 => cmd_pda(config, None).await?,
         3 => cmd_sign_tx(config).await?,
-        4 => cmd_config_menu().await?,
+        4 => cmd_search(config, None).await?,
+        5 => cmd_config_menu().await?,
         _ => println!("{}", "Goodbye.".dimmed()),
     }
 
@@ -571,12 +573,147 @@ pub async fn cmd_sign_tx(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Non-interactive variant — takes the tx directly without prompting.
+pub async fn cmd_sign_tx_direct(config: &Config, tx: &str) -> Result<()> {
+    let keypair_path = match &config.keypair_path {
+        Some(p) => p.clone(),
+        None => {
+            bail!("No keypair configured. Run 'orquestra config set --keypair <path>' first.");
+        }
+    };
+
+    let fee_payer = solana::pubkey_from_keypair_file(&keypair_path)
+        .context("Failed to read public key from keypair file")?;
+
+    let network = infer_network(config.rpc());
+
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.set_message("Signing and sending...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
+    let result = solana::sign_and_send(tx, &keypair_path, config.rpc(), &fee_payer).await;
+    spinner.finish_and_clear();
+
+    match result {
+        Ok(signature) => {
+            println!("{} Transaction confirmed!", "✓".green().bold());
+            println!("  Signature : {}", signature.cyan());
+            let explorer = explorer_url(&signature, &network);
+            println!("  Explorer  : {}", explorer.dimmed());
+        }
+        Err(e) => {
+            println!("{} Failed to send: {e}", "✗".red().bold());
+        }
+    }
+
+    Ok(())
+}
+
 fn non_empty(s: String) -> Option<String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+// ── Program search ───────────────────────────────────────────────────────────
+
+pub async fn cmd_search(config: &Config, query: Option<&str>) -> Result<()> {
+    let q: String = match query {
+        Some(q) => q.to_string(),
+        None => Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Search query")
+            .interact_text()?,
+    };
+
+    let client = ApiClient::new(config.api_base(), config.api_key.clone());
+    let mut page: u64 = 1;
+
+    loop {
+        let spinner = indicatif::ProgressBar::new_spinner();
+        spinner.set_message(format!("Searching (page {page})..."));
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        let result = client.search_programs(&q, page).await;
+        spinner.finish_and_clear();
+
+        let resp = match result {
+            Err(e) => {
+                println!("{} Search failed: {e}", "✗".red().bold());
+                return Ok(());
+            }
+            Ok(r) if r.projects.is_empty() => {
+                println!("\n{} No programs found for '{q}'.\n", "○".dimmed());
+                return Ok(());
+            }
+            Ok(r) => r,
+        };
+
+        let total = resp.pagination.as_ref().map(|p| p.total).unwrap_or(resp.projects.len() as u64);
+        let total_pages = resp.pagination.as_ref().map(|p| p.total_pages).unwrap_or(1);
+
+        println!(
+            "\n{} {} result{} for '{}' — page {}/{}\n",
+            "▸".cyan().bold(),
+            total,
+            if total == 1 { "" } else { "s" },
+            q,
+            page,
+            total_pages,
+        );
+
+        // Build fuzzy-select items: one entry per result + nav actions
+        let mut items: Vec<String> = resp.projects.iter().map(|p| {
+            let cat = p.category.as_deref().unwrap_or("-");
+            let tags = p.tags.as_deref().unwrap_or("");
+            format!("{} [{}] — {}", p.name, cat, tags)
+        }).collect();
+
+        if page < total_pages { items.push("▶  Next page".to_string()); }
+        if page > 1           { items.push("◀  Prev page".to_string()); }
+        items.push("✕  Cancel".to_string());
+
+        let sel = FuzzySelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select a program (or navigate)")
+            .items(&items)
+            .default(0)
+            .interact()?;
+
+        let n = resp.projects.len();
+
+        if sel < n {
+            // User picked a program
+            let chosen = &resp.projects[sel];
+            println!(
+                "\n  {} {}\n  {} {}\n",
+                "Program:".bold(), chosen.name.cyan(),
+                "ID:".bold(), chosen.program_id.dimmed(),
+            );
+            let confirm = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Set '{}' as active project in config?", chosen.name))
+                .default(true)
+                .interact()?;
+
+            if confirm {
+                let mut cfg = Config::load()?;
+                cfg.project_id = Some(chosen.program_id.clone());
+                cfg.save()?;
+                println!("{} project_id set to {}", "✓".green().bold(), chosen.program_id.cyan());
+            }
+            return Ok(());
+        }
+
+        // Nav / cancel actions
+        let label = &items[sel];
+        if label.starts_with("▶") {
+            page += 1;
+        } else if label.starts_with("◀") {
+            page -= 1;
+        } else {
+            // Cancel
+            return Ok(());
+        }
     }
 }
 

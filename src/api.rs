@@ -161,6 +161,39 @@ pub struct DerivedSeed {
     pub hex: String,
 }
 
+/// Search: GET /api/projects/search?q={query}
+#[derive(Debug, Deserialize)]
+pub struct SearchProject {
+    #[allow(dead_code)]
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "program_id")]
+    pub program_id: String,
+    #[allow(dead_code)]
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub tags: Option<String>,
+    #[allow(dead_code)]
+    pub username: Option<String>,
+    #[allow(dead_code)]
+    pub match_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct SearchPagination {
+    pub total: u64,
+    pub page: u64,
+    #[serde(rename = "totalPages")]
+    pub total_pages: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchResponse {
+    pub projects: Vec<SearchProject>,
+    pub pagination: Option<SearchPagination>,
+}
+
 /// POST body for /build
 #[derive(Debug, Serialize)]
 pub struct BuildRequest {
@@ -376,5 +409,37 @@ impl ApiClient {
         let derived: DeriveResponse = serde_json::from_str(&text)
             .with_context(|| format!("Cannot parse derive response:\n{text}"))?;
         Ok(derived)
+    }
+
+    /// Search programs by name or description.
+    /// Calls GET /api/projects?search={query}&page={page}
+    pub async fn search_programs(&self, query: &str, page: u64) -> Result<SearchResponse> {
+        let page_str = page.to_string();
+        let url = self.url("api/projects");
+        let resp = self
+            .apply_api_key(
+                self.client
+                    .get(&url)
+                    .query(&[("search", query), ("page", page_str.as_str())])
+                    .header("Cache-Control", "no-cache")
+                    .header("Pragma", "no-cache"),
+            )
+            .send()
+            .await
+            .with_context(|| format!("Failed to reach {url}"))?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!("API error {status}: {text}");
+        }
+
+        // Try wrapped {"projects": [...]} first, then direct array
+        if let Ok(sr) = serde_json::from_str::<SearchResponse>(&text) {
+            return Ok(sr);
+        }
+        let list: Vec<SearchProject> = serde_json::from_str(&text)
+            .with_context(|| format!("Cannot parse search response:\n{text}"))?;
+        Ok(SearchResponse { projects: list, pagination: None })
     }
 }

@@ -36,6 +36,16 @@ async fn main() -> Result<()> {
             interactive::cmd_pda(&config, account.as_deref()).await?;
         }
 
+        Some(Commands::Sign { tx }) => {
+            let config = Config::load()?;
+            interactive::cmd_sign_tx_direct(&config, &tx).await?;
+        }
+
+        Some(Commands::Search { query }) => {
+            let config = Config::load()?;
+            interactive::cmd_search(&config, query.as_deref()).await?;
+        }
+
         Some(Commands::Config { action }) => match action {
             ConfigAction::Set(args) => {
                 let mut config = Config::load()?;

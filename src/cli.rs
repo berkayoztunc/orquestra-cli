@@ -29,6 +29,18 @@ pub enum Commands {
         account: Option<String>,
     },
 
+    /// Sign and send a base58-encoded serialized transaction
+    Sign {
+        /// Base58-encoded serialized transaction
+        tx: String,
+    },
+
+    /// Search for programs on orquestra
+    Search {
+        /// Search query (prompts interactively if omitted)
+        query: Option<String>,
+    },
+
     /// Manage CLI configuration
     Config {
         #[command(subcommand)]

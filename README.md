@@ -25,6 +25,14 @@ Upload your Anchor IDL to orquestra once, **or point the CLI directly at a local
 
 ## Installation
 
+### One-liner (macOS & Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berkayoztunc/orquestra-cli/master/install.sh | sh
+```
+
+Detects OS/arch, grabs latest release binary, installs to `/usr/local/bin`.
+
 ### Homebrew (macOS)
 
 ```bash
