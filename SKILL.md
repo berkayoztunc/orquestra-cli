@@ -146,3 +146,57 @@ orquestra simulate <BASE58_TX>
 - If a command fails with "project_id not set", run `orquestra config set --project-id <ADDR>`.
 - Keypair path must not have trailing spaces; use `orquestra config set --keypair <path>` to normalize.
 - Explorer links are printed automatically after confirmed sends (Solana Explorer, mainnet or devnet based on RPC).
+
+## Agent execution guide — handling interactive prompts
+
+`orquestra run`, `orquestra pda`, and the bare `orquestra` menu all use interactive prompts (dialoguer). **Never tell the user to run the command themselves.** Instead, drive the prompts programmatically using `run_in_terminal` + `send_to_terminal`.
+
+### How to execute an interactive command
+
+1. Start the command with `run_in_terminal`, `mode=sync`, short timeout (e.g. `5000` ms). It will time out while waiting for input and return a terminal `id`.
+2. Call `get_terminal_output` with that `id` to read the current prompt.
+3. Call `send_to_terminal` with the `id` to answer the prompt — **one answer per call**, exactly matching what the prompt expects.
+4. After each send, call `get_terminal_output` again to read the next prompt.
+5. Repeat until the command exits (output shows a signature/explorer link or an error).
+
+### Prompt sequence for `orquestra run <instruction>`
+
+Always pass the instruction name directly (e.g. `orquestra run initialize`) to **skip** the FuzzySelect menu — the menu requires arrow keys which cannot be automated. With the name provided, prompts appear in this order:
+
+| Step | Prompt looks like | What to send |
+|------|-------------------|--------------|
+| 1 | `{arg_name} ({type}):` — one per instruction arg | The value (e.g. `42`), then `\n` |
+| 2 | `{acc_name} [mut, signer]:` — one per account | The public key address, then `\n`. **Signer accounts auto-fill with keypair pubkey — send just `\n` to accept.** |
+| 3 | `Build transaction for '…'? [Y/n]` | `\n` to confirm (default Yes), or `n\n` to abort |
+| 4 | `Sign and send transaction to Solana? [Y/n]` | `\n` to confirm (default Yes), or `n\n` to skip and print base58 tx instead |
+
+If the instruction has **no args**, step 1 is skipped entirely.
+
+### Prompt sequence for `orquestra pda <account-name>`
+
+| Step | Prompt looks like | What to send |
+|------|-------------------|--------------|
+| 1 | `{seed_name} ({type}):` — one per seed | The seed value, then `\n` |
+
+The derived address is printed to stdout after all seeds are entered.
+
+### Example (agent drives `orquestra run <instruction>`)
+
+```
+run_in_terminal("orquestra run <instruction>", mode=sync, timeout=5000)
+# → returns terminal id, output shows first account/arg prompt
+send_to_terminal(id, "<VALUE>\n")   # answer first prompt
+# → get_terminal_output shows: "<signer_account> [signer]: <KEYPAIR_PUBKEY>"
+send_to_terminal(id, "\n")          # accept default signer
+# → get_terminal_output shows: "Build transaction for '<instruction>'? [Y/n]"
+send_to_terminal(id, "\n")          # confirm build
+# → get_terminal_output shows: "Sign and send transaction to Solana? [Y/n]"
+send_to_terminal(id, "\n")          # confirm send
+# → get_terminal_output shows signature + explorer link
+```
+
+### Do not do this
+
+- Do **not** tell the user "this requires an interactive terminal, please run it yourself".
+- Do **not** use bare `orquestra run` without an instruction name — the FuzzySelect cannot be driven non-interactively.
+- Do **not** send multiple answers in a single `send_to_terminal` call.
