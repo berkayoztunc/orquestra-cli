@@ -337,24 +337,6 @@ solana-keygen new --outfile ~/.config/solana/id.json
 
 ---
 
-## Distribution
-
-### Releasing a new version
-
-1. Bump `version` in `Cargo.toml`
-2. Push a tag: `git tag v0.2.0 && git push --tags`
-3. GitHub Actions compiles binaries for all 4 platforms, creates a GitHub Release, and updates `Formula/orquestra-cli.rb` with the new SHA256 checksums automatically
-
-### Custom tap (already set up)
-
-```bash
-brew tap berkayoztunc/orquestra-cli https://github.com/berkayoztunc/orquestra-cli
-brew install orquestra-cli
-brew upgrade orquestra-cli
-```
-
----
-
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

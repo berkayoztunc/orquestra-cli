@@ -1,86 +1,148 @@
 ---
 name: orquestra-cli
-description: Work with the orquestra-cli Rust project to add commands, update config, improve API/file flows, and debug Solana transaction UX.
-argument-hint: What do you want to build or fix in orquestra-cli?
+description: Use the orquestra CLI to interact with Solana programs — configure project, list/run instructions, derive PDAs, sign/simulate transactions, look up tx details, and search programs. Use when a user asks to run a Solana instruction, derive a PDA, sign or simulate a transaction, look up a transaction, search orquestra programs, or configure the CLI.
+argument-hint: What do you want to do with the orquestra CLI?
 ---
 
-# orquestra-cli Development Skill
+# orquestra CLI Usage Skill
 
-Use this skill when an agent must modify, debug, or extend this repository.
+Use this skill when an AI agent needs to operate the `orquestra` CLI to interact with Solana programs.
 
-## When to use
-
-- Add or change CLI subcommands in clap/router flow.
-- Update config fields or defaults.
-- Modify interactive prompts and command UX.
-- Work on API mode or local IDL file mode behavior.
-- Debug transaction build/sign/send and PDA derivation.
-- Prepare release-related version/changelog updates.
-
-## Repository map
-
-| File | Responsibility |
-|------|---------------|
-| `src/main.rs` | Entry point and command routing |
-| `src/cli.rs` | `clap` command/arg definitions |
-| `src/config.rs` | Config schema, load/save/merge, display |
-| `src/api.rs` | API client methods (`resolve_project_id`, `list_instructions`, `list_pda_accounts`) |
-| `src/interactive.rs` | End-user command flows and prompts |
-| `src/idl.rs` | Local Solana/Anchor IDL JSON parsing |
-| `src/solana.rs` | Transaction build/sign/send, keypair load, PDA derivation |
-
-## Constraints and gotchas
-
-- Config path on macOS: `~/Library/Application Support/orquestra/config.toml`.
-- Important config fields: `project_id`, `api_key`, `rpc_url`, `keypair_path`, `api_base_url`, `idl_path`.
-- Normalize string fields through config merge helpers; keypair path may include trailing spaces from user input.
-- If `idl_path` is set, command flows should bypass API and use file mode.
-
-## Command surface
+## Install
 
 ```bash
-orquestra
-orquestra list
-orquestra run [instruction]
-orquestra pda [account]
-orquestra sign <base58-tx>
-orquestra search [query]
-orquestra config set ...
+curl -fsSL https://raw.githubusercontent.com/berkayoztunc/orquestra-cli/master/install.sh | bash
+```
+
+## Configuration
+
+Config is stored at `~/Library/Application Support/orquestra/config.toml` (macOS).
+
+```bash
+# Set project (Solana program address)
+orquestra config set --project-id <PROGRAM_ADDRESS>
+
+# Set API key (from orquestra.dev)
+orquestra config set --api-key <YOUR_API_KEY>
+
+# Set Solana keypair for signing
+orquestra config set --keypair ~/.config/solana/id.json
+
+# Set RPC endpoint (default: mainnet-beta)
+orquestra config set --rpc https://api.mainnet-beta.solana.com
+
+# Use a local IDL file instead of the API (offline/file mode)
+orquestra config set --idl ./path/to/program.json
+
+# Show current config (API key masked)
 orquestra config show
+
+# Reset config interactively
 orquestra config reset
 ```
 
-## Work pattern for agents
+**Required fields before running instructions:** `project_id` (or `idl_path`), `keypair` (for signing).
 
-1. Read related files in `src/` before editing.
-2. Keep behavior parity between API mode and local IDL file mode where expected.
-3. Use `anyhow::Result`, user-readable `bail!`, and `.context()` for IO/parse failures.
-4. Preserve current prompt style (`dialoguer`, `ColorfulTheme`, `FuzzySelect` where applicable).
-5. Validate with `cargo run -- <args>` or `cargo build` after changes.
+## Commands
 
-## Typical edits
-
-### Add subcommand
-
-1. Add variant/args in `src/cli.rs`.
-2. Add router arm in `src/main.rs`.
-3. Implement command handler in `src/interactive.rs`.
-4. Add menu entry in `cmd_menu` when needed.
-5. Extend `src/api.rs` if remote data is required.
-
-### Add config field
-
-1. Add field to `Config` in `src/config.rs`.
-2. Add CLI flag in `ConfigSetArgs` in `src/cli.rs`.
-3. Merge field in `Config::merge()`.
-4. Show field in `Config::display()` when relevant.
-
-## Build and release
-
+### List instructions
 ```bash
-cargo run -- <args>
-cargo build --release
-cargo build --release --target aarch64-apple-darwin
+orquestra list
+```
+Lists all instructions available in the configured program.
+
+### Run an instruction
+```bash
+orquestra run                  # interactive fuzzy-select
+orquestra run <instruction>    # run directly by name, e.g. orquestra run initialize
+```
+Prompts for args and accounts, shows a summary, builds the transaction, then signs and sends if a keypair is configured. If no keypair, outputs the base58 serialized transaction.
+
+### Derive a PDA
+```bash
+orquestra pda                  # interactive select
+orquestra pda <account-name>   # derive by account name directly
+```
+Prompts for seeds and derives the program-derived address.
+
+### Sign and send a transaction
+```bash
+orquestra sign <BASE58_TX>
+```
+Signs the provided base58-encoded serialized transaction with the configured keypair and broadcasts it.
+
+### Simulate a transaction
+```bash
+orquestra simulate             # prompts for tx
+orquestra simulate <BASE58_TX> # simulate directly
+```
+Runs a dry-run simulation — shows logs and compute units without sending.
+
+### Look up a transaction
+```bash
+orquestra tx                   # prompts for signature
+orquestra tx <SIGNATURE>       # look up directly
+```
+Fetches and displays transaction details, status, and logs.
+
+### Search programs
+```bash
+orquestra search               # prompts for query
+orquestra search <query>       # search directly, e.g. orquestra search "token swap"
+```
+Searches programs indexed on orquestra.dev.
+
+### Fetch IDL
+```bash
+orquestra idl fetch                             # uses config project_id
+orquestra idl fetch <PROGRAM_ID>                # override program
+orquestra idl fetch <PROGRAM_ID> -o ./idl.json  # save to custom path
 ```
 
-Release flow uses `.github/workflows/release.yml` and version tags (`vX.Y.Z`).
+### Interactive menu
+```bash
+orquestra   # no subcommand — launches interactive menu
+```
+
+## Two modes
+
+| Mode | When | Behavior |
+|------|------|----------|
+| **API mode** | `project_id` set, no `idl_path` | Fetches instructions/PDAs from orquestra.dev API |
+| **File mode** | `idl_path` set | Parses local IDL JSON, builds tx locally — no API network call |
+
+## Common workflows
+
+### Run an instruction end-to-end
+```bash
+orquestra config set --project-id <ADDR> --keypair ~/.config/solana/id.json
+orquestra run initialize
+# → prompts for args/accounts → builds tx → signs & sends → prints signature + explorer link
+```
+
+### Offline with local IDL
+```bash
+orquestra config set --idl ./my_program.json --keypair ~/.config/solana/id.json
+orquestra run
+```
+
+### Build tx without sending (no keypair)
+```bash
+orquestra config set --project-id <ADDR>
+orquestra run transfer
+# → no keypair configured → prints base58 tx for external signing
+# then sign manually:
+orquestra sign <BASE58_TX>
+```
+
+### Simulate before sending
+```bash
+orquestra simulate <BASE58_TX>
+```
+
+## Tips for agents
+
+- Always run `orquestra config show` first to confirm required fields are set.
+- If a command fails with "project_id not set", run `orquestra config set --project-id <ADDR>`.
+- Keypair path must not have trailing spaces; use `orquestra config set --keypair <path>` to normalize.
+- Explorer links are printed automatically after confirmed sends (Solana Explorer, mainnet or devnet based on RPC).
