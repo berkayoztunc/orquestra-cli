@@ -442,4 +442,23 @@ impl ApiClient {
             .with_context(|| format!("Cannot parse search response:\n{text}"))?;
         Ok(SearchResponse { projects: list, pagination: None })
     }
+
+    /// Fetch the raw IDL JSON for a project.
+    /// Calls GET /api/{projectId}/idl
+    pub async fn fetch_idl(&self, project_id: &str) -> Result<String> {
+        let url = self.url(&format!("api/{project_id}/idl"));
+        let resp = self
+            .apply_api_key(self.client.get(&url))
+            .send()
+            .await
+            .with_context(|| format!("Failed to reach {url}"))?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!("API error {status} fetching IDL for project '{project_id}': {text}");
+        }
+
+        Ok(text)
+    }
 }

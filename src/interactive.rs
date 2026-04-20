@@ -22,6 +22,8 @@ pub async fn cmd_menu(config: &Config) -> Result<()> {
         "Run      — run an instruction",
         "Find PDA  — derive a program-derived address",
         "Sign tx  — sign and send a serialized transaction",
+        "Simulate — simulate a transaction without sending",
+        "Tx       — look up a transaction by signature",
         "Search   — search programs on orquestra",
         "Config   — view or update configuration",
         "Quit",
@@ -38,8 +40,10 @@ pub async fn cmd_menu(config: &Config) -> Result<()> {
         1 => cmd_run(config, None).await?,
         2 => cmd_pda(config, None).await?,
         3 => cmd_sign_tx(config).await?,
-        4 => cmd_search(config, None).await?,
-        5 => cmd_config_menu().await?,
+        4 => cmd_simulate(config, None).await?,
+        5 => cmd_tx(config, None).await?,
+        6 => cmd_search(config, None).await?,
+        7 => cmd_config_menu().await?,
         _ => println!("{}", "Goodbye.".dimmed()),
     }
 
@@ -1258,4 +1262,345 @@ fn collect_accounts_idl(
     }
 
     Ok((collected, fee_payer))
+}
+
+// ── Simulate ─────────────────────────────────────────────────────────────────
+
+pub async fn cmd_simulate(config: &Config, tx_opt: Option<&str>) -> Result<()> {
+    let tx: String = match tx_opt {
+        Some(t) => t.to_string(),
+        None => Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Transaction (base58)")
+            .interact_text()?,
+    };
+
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.set_message("Simulating...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    let result = solana::simulate_transaction(&tx, config.rpc()).await;
+    spinner.finish_and_clear();
+    let sim = result?;
+
+    let network = infer_network(config.rpc());
+
+    println!();
+    if let Some(err) = &sim.err {
+        println!("{} Simulation FAILED\n", "✗".red().bold());
+        println!("  Error : {}", err.to_string().red());
+    } else {
+        println!("{} Simulation passed\n", "✓".green().bold());
+    }
+
+    if let Some(cu) = sim.units_consumed {
+        println!("  Compute units : {}", cu.to_string().yellow());
+    }
+
+    if let Some(logs) = &sim.logs {
+        if !logs.is_empty() {
+            println!("\n{}", "Logs:".bold());
+            for log in logs {
+                let colored = if log.contains("Error") || log.contains("failed") || log.contains("panicked") {
+                    log.red().to_string()
+                } else if log.contains("invoke") || log.contains("success") {
+                    log.green().dimmed().to_string()
+                } else {
+                    log.dimmed().to_string()
+                };
+                println!("  {colored}");
+            }
+        }
+    }
+    println!();
+
+    // Offer sign + send if simulation succeeded and keypair configured
+    if sim.err.is_none() {
+        if let Some(keypair_path) = &config.keypair_path {
+            if Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("Simulation passed — sign and send?")
+                .default(false)
+                .interact()?
+            {
+                let fee_payer = solana::pubkey_from_keypair_file(keypair_path)
+                    .context("Failed to read public key from keypair file")?;
+
+                let spinner = indicatif::ProgressBar::new_spinner();
+                spinner.set_message("Signing and sending...");
+                spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+                let result = solana::sign_and_send(&tx, keypair_path, config.rpc(), &fee_payer).await;
+                spinner.finish_and_clear();
+
+                match result {
+                    Ok(signature) => {
+                        println!("{} Transaction confirmed!", "✓".green().bold());
+                        println!("  Signature : {}", signature.cyan());
+                        println!("  Explorer  : {}", explorer_url(&signature, &network).dimmed());
+                    }
+                    Err(e) => println!("{} Failed to send: {e}", "✗".red().bold()),
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── Tx lookup ────────────────────────────────────────────────────────────────
+
+pub async fn cmd_tx(config: &Config, sig_opt: Option<&str>) -> Result<()> {
+    let signature: String = match sig_opt {
+        Some(s) => s.to_string(),
+        None => Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Transaction signature")
+            .interact_text()?,
+    };
+
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.set_message("Fetching transaction...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    let result = solana::get_transaction(&signature, config.rpc()).await;
+    spinner.finish_and_clear();
+    let tx = result?;
+
+    let network = infer_network(config.rpc());
+
+    println!();
+
+    // ── Status ────────────────────────────────────────────────────────────────
+    if let Some(meta) = &tx.meta {
+        if meta.err.is_some() {
+            println!("  {} {}", "Status :".bold(), "FAILED".red().bold());
+            if let Some(err) = &meta.err {
+                println!("  {} {}", "Error  :".bold(), err.to_string().red());
+            }
+        } else {
+            println!("  {} {}", "Status :".bold(), "SUCCESS".green().bold());
+        }
+        if let Some(fee) = meta.fee {
+            println!("  {} {} lamports", "Fee    :".bold(), fee.to_string().yellow());
+        }
+        if let Some(cu) = meta.compute_units_consumed {
+            println!("  {} {}", "CU used:".bold(), cu.to_string().yellow());
+        }
+    }
+    if let Some(ts) = tx.block_time {
+        println!("  {} {} (unix)", "Time   :".bold(), ts.to_string().dimmed());
+    }
+    if let Some(slot) = tx.slot {
+        println!("  {} {}", "Slot   :".bold(), slot.to_string().dimmed());
+    }
+    println!();
+
+    // ── Account keys ─────────────────────────────────────────────────────────
+    // JSON encoding returns account_keys as either strings or objects depending
+    // on the encoding variant. Normalise to a Vec<String>.
+    let account_keys: Vec<String> = tx
+        .transaction
+        .message
+        .account_keys
+        .iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            obj => obj
+                .get("pubkey")
+                .and_then(|p| p.as_str())
+                .unwrap_or("?")
+                .to_string(),
+        })
+        .collect();
+
+    // ── Instructions ─────────────────────────────────────────────────────────
+    println!("{}", "Instructions:".bold());
+    for (i, ix_val) in tx.transaction.message.instructions.iter().enumerate() {
+        // JSON encoding: { programIdIndex, accounts: [u8], data: string }
+        let prog_idx = ix_val
+            .get("programIdIndex")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let program = account_keys.get(prog_idx).map(|s| s.as_str()).unwrap_or("?");
+
+        let acc_indices: Vec<usize> = ix_val
+            .get("accounts")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect())
+            .unwrap_or_default();
+
+        let data_str = ix_val
+            .get("data")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        println!("  [{}] Program : {}", i, program.cyan());
+        for (j, &acc_idx) in acc_indices.iter().enumerate() {
+            let acc = account_keys.get(acc_idx).map(|s| s.as_str()).unwrap_or("?");
+            println!("      acc[{}] = {}", j, acc.dimmed());
+        }
+
+        // Try to match Anchor discriminator against IDL/API
+        let decoded_name = if !data_str.is_empty() {
+            anchor_decode_ix_name(data_str, program, config).await
+        } else {
+            None
+        };
+
+        match decoded_name {
+            Some(name) => println!("      data   : {} ({})", name.green().bold(), data_str.dimmed()),
+            None if !data_str.is_empty() => println!("      data   : {}", data_str.dimmed()),
+            None => {}
+        }
+    }
+    println!();
+
+    // ── Logs ─────────────────────────────────────────────────────────────────
+    if let Some(meta) = &tx.meta {
+        if let Some(logs) = &meta.log_messages {
+            if !logs.is_empty() {
+                println!("{}", "Logs:".bold());
+                for log in logs {
+                    let colored = if log.contains("Error") || log.contains("failed") {
+                        log.red().to_string()
+                    } else if log.contains("invoke") || log.contains("success") {
+                        log.green().dimmed().to_string()
+                    } else {
+                        log.dimmed().to_string()
+                    };
+                    println!("  {colored}");
+                }
+                println!();
+            }
+        }
+    }
+
+    println!("  Explorer : {}", explorer_url(&signature, &network).dimmed());
+    println!();
+
+    Ok(())
+}
+
+/// Try to decode the instruction data bytes as an Anchor discriminator and
+/// match it against the configured IDL / API instructions.
+/// Returns the instruction name if matched, None otherwise.
+async fn anchor_decode_ix_name(data: &str, program_id: &str, config: &Config) -> Option<String> {
+    use base64::Engine;
+    let bytes = if let Ok(b) = bs58::decode(data).into_vec() {
+        b
+    } else if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(data) {
+        b
+    } else {
+        return None;
+    };
+
+    if bytes.len() < 8 {
+        return None;
+    }
+    let disc = &bytes[..8];
+
+    // Resolve instructions from local IDL or API
+    let instructions: Vec<crate::api::Instruction> = if let Some(idl_path) = &config.idl_path {
+        if let Ok(parsed) = crate::idl::parse_idl_file(idl_path) {
+            if parsed.address != program_id {
+                return None;
+            }
+            crate::idl::idl_to_instructions(&parsed)
+        } else {
+            return None;
+        }
+    } else if config.project_id.as_deref() == Some(program_id) {
+        let client = ApiClient::new(config.api_base(), config.optional_api_key());
+        let project = client.resolve_project_id(program_id).await.ok()?;
+        client.list_instructions(&project.id).await.ok()?
+    } else {
+        return None;
+    };
+
+    // Anchor discriminator = sha256("global:<name>")[..8]
+    for ix in &instructions {
+        let expected = anchor_discriminator(&ix.name);
+        if expected == disc {
+            return Some(ix.name.clone());
+        }
+    }
+    None
+}
+
+fn anchor_discriminator(name: &str) -> [u8; 8] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("global:{name}"));
+    let hash = hasher.finalize();
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&hash[..8]);
+    out
+}
+
+// ── IDL fetch ────────────────────────────────────────────────────────────────
+
+pub async fn cmd_idl_fetch(
+    config: &Config,
+    program_id_opt: Option<&str>,
+    output_opt: Option<&str>,
+) -> Result<()> {
+    let program_address = program_id_opt
+        .or(config.project_id.as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No program ID. Pass one as argument or set with 'orquestra config set --project-id <ADDR>'"
+            )
+        })?;
+
+    let client = ApiClient::new(config.api_base(), config.optional_api_key());
+
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.set_message("Resolving program...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    let project = client.resolve_project_id(program_address).await;
+    spinner.finish_and_clear();
+    let project = project?;
+
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.set_message(format!("Fetching IDL for {}...", project.name));
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    let idl_json = client.fetch_idl(&project.id).await;
+    spinner.finish_and_clear();
+    let idl_json = idl_json?;
+
+    // Determine output path
+    let output_path = if let Some(p) = output_opt {
+        p.to_string()
+    } else {
+        let idl_dir = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("orquestra")
+            .join("idl");
+        std::fs::create_dir_all(&idl_dir).context("Failed to create IDL cache directory")?;
+        idl_dir
+            .join(format!("{program_address}.json"))
+            .to_string_lossy()
+            .to_string()
+    };
+
+    std::fs::write(&output_path, &idl_json)
+        .with_context(|| format!("Failed to write IDL to {output_path}"))?;
+
+    println!("\n{} IDL saved!\n", "✓".green().bold());
+    println!("  Program : {}", program_address.cyan());
+    println!("  Name    : {}", project.name.bold());
+    println!("  File    : {}", output_path.dimmed());
+    println!();
+
+    if Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Set as idl_path in config? (enables offline mode)")
+        .default(true)
+        .interact()?
+    {
+        let mut cfg = Config::load()?;
+        cfg.idl_path = Some(output_path.clone());
+        cfg.save()?;
+        println!(
+            "{} idl_path set to {}",
+            "✓".green().bold(),
+            output_path.cyan()
+        );
+    }
+
+    Ok(())
 }

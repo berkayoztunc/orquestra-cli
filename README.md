@@ -69,6 +69,24 @@ cargo build --release
 # binary is at target/release/orquestra
 ```
 
+### Install as an agent skill
+
+This repository also ships a top-level `SKILL.md`, so agent frameworks that support `skills` can install it directly.
+
+```bash
+npx skills add berkayoztunc/orquestra-cli
+```
+
+Useful variants:
+
+```bash
+# list skills found in repo
+npx skills add berkayoztunc/orquestra-cli -l
+
+# install to all supported agents/targets
+npx skills add berkayoztunc/orquestra-cli --all
+```
+
 ---
 
 ## Setup

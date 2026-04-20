@@ -41,10 +41,41 @@ pub enum Commands {
         query: Option<String>,
     },
 
+    /// Simulate a transaction without sending it (shows logs and compute units)
+    Simulate {
+        /// Base58-encoded serialized transaction (prompts if omitted)
+        tx: Option<String>,
+    },
+
+    /// Look up a transaction by signature and display its details
+    Tx {
+        /// Transaction signature (prompts if omitted)
+        signature: Option<String>,
+    },
+
+    /// Manage the program IDL
+    Idl {
+        #[command(subcommand)]
+        action: IdlAction,
+    },
+
     /// Manage CLI configuration
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum IdlAction {
+    /// Fetch IDL from the orquestra API and save locally
+    Fetch {
+        /// Program ID to fetch IDL for (overrides config project_id)
+        program_id: Option<String>,
+
+        /// Output file path (default: ~/.config/orquestra/idl/<program_id>.json)
+        #[arg(long, short)]
+        output: Option<String>,
     },
 }
 

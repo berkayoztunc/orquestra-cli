@@ -7,7 +7,7 @@ mod solana;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands, ConfigAction};
+use cli::{Cli, Commands, ConfigAction, IdlAction};
 use colored::Colorize;
 use config::Config;
 
@@ -45,6 +45,23 @@ async fn main() -> Result<()> {
             let config = Config::load()?;
             interactive::cmd_search(&config, query.as_deref()).await?;
         }
+
+        Some(Commands::Simulate { tx }) => {
+            let config = Config::load()?;
+            interactive::cmd_simulate(&config, tx.as_deref()).await?;
+        }
+
+        Some(Commands::Tx { signature }) => {
+            let config = Config::load()?;
+            interactive::cmd_tx(&config, signature.as_deref()).await?;
+        }
+
+        Some(Commands::Idl { action }) => match action {
+            IdlAction::Fetch { program_id, output } => {
+                let config = Config::load()?;
+                interactive::cmd_idl_fetch(&config, program_id.as_deref(), output.as_deref()).await?;
+            }
+        },
 
         Some(Commands::Config { action }) => match action {
             ConfigAction::Set(args) => {

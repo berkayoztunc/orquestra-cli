@@ -632,3 +632,145 @@ fn blockhash_offset(message: &[u8]) -> Result<usize> {
 
     Ok(accounts_end)
 }
+
+// ── simulate_transaction ─────────────────────────────────────────────────────
+
+#[derive(Deserialize, Debug)]
+pub struct SimulateValue {
+    pub err: Option<Value>,
+    pub logs: Option<Vec<String>>,
+    #[serde(rename = "unitsConsumed")]
+    pub units_consumed: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SimulateResponse {
+    result: Option<SimulateResult>,
+    error: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct SimulateResult {
+    value: SimulateValue,
+}
+
+/// Simulate a transaction via RPC without signing or sending.
+/// Accepts the same base58/base64 encoded tx formats as `sign_and_send`.
+pub async fn simulate_transaction(base58_tx: &str, rpc_url: &str) -> Result<SimulateValue> {
+    let tx_bytes = decode_transaction_bytes(base58_tx)?;
+
+    // Build a wire tx with a zeroed sig for simulate.
+    // replaceRecentBlockhash:true means RPC will patch the blockhash, so zeros are fine.
+    let message = if let Ok(tx_json) = serde_json::from_slice::<TxJson>(&tx_bytes) {
+        build_message_from_json(&tx_json, &[0u8; 32])?
+    } else {
+        extract_message_bytes(&tx_bytes)?
+    };
+
+    let mut wire: Vec<u8> = Vec::with_capacity(1 + 64 + message.len());
+    wire.push(1u8);
+    wire.extend_from_slice(&[0u8; 64]); // zeroed dummy signature
+    wire.extend_from_slice(&message);
+    let encoded = bs58::encode(&wire).into_string();
+
+    let client = reqwest::Client::new();
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "simulateTransaction",
+        "params": [encoded, {
+            "encoding": "base58",
+            "commitment": "confirmed",
+            "sigVerify": false,
+            "replaceRecentBlockhash": true
+        }]
+    });
+
+    let resp: SimulateResponse = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .context("RPC simulateTransaction failed")?
+        .json()
+        .await
+        .context("Failed to parse simulateTransaction response")?;
+
+    if let Some(err) = resp.error {
+        bail!("RPC error: {err}");
+    }
+
+    resp.result
+        .map(|r| r.value)
+        .context("No result in simulateTransaction response")
+}
+
+// ── get_transaction ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Debug)]
+pub struct TxMeta {
+    pub err: Option<Value>,
+    pub fee: Option<u64>,
+    #[serde(rename = "logMessages")]
+    pub log_messages: Option<Vec<String>>,
+    #[serde(rename = "computeUnitsConsumed")]
+    pub compute_units_consumed: Option<u64>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct TxMessageInfo {
+    /// Flat account key list (JSON encoding returns strings)
+    #[serde(rename = "accountKeys")]
+    pub account_keys: Vec<Value>,
+    pub instructions: Vec<Value>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GetTransactionData {
+    pub message: TxMessageInfo,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GetTransactionResult {
+    pub transaction: GetTransactionData,
+    pub meta: Option<TxMeta>,
+    #[serde(rename = "blockTime")]
+    pub block_time: Option<i64>,
+    pub slot: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GetTransactionResponse {
+    result: Option<GetTransactionResult>,
+    error: Option<Value>,
+}
+
+/// Fetch a confirmed transaction by its base58 signature.
+pub async fn get_transaction(signature: &str, rpc_url: &str) -> Result<GetTransactionResult> {
+    let client = reqwest::Client::new();
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getTransaction",
+        "params": [signature, {
+            "encoding": "json",
+            "commitment": "confirmed",
+            "maxSupportedTransactionVersion": 0
+        }]
+    });
+
+    let resp: GetTransactionResponse = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .context("RPC getTransaction failed")?
+        .json()
+        .await
+        .context("Failed to parse getTransaction response")?;
+
+    if let Some(err) = resp.error {
+        bail!("RPC error: {err}");
+    }
+
+    resp.result
+        .context("Transaction not found (check the signature and commitment level)")
+}
